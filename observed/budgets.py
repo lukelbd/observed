@@ -4,7 +4,6 @@ Functions for loading carbon station data.
 """
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pint_pandas  # noqa: F401  # define accessor
 from icecream import ic  # noqa: F401
@@ -16,7 +15,9 @@ __all__ = ['load_budget']
 # Assign climopy unit registry
 # See: https://github.com/hgrecco/pint-pandas/issues/136
 # NOTE: Using data['column'] fails with dataframes quantified outside of pint-pandas
-# interface. Instead use data.column or data.get('column').
+# interface (Series are not supported). Instead use data[['column']] to maintain the
+# dataframe or data.column or data.get('column') to bypass the overridden Quantity
+# __getitem__ indexer and automatically strip the units before returning the series.
 # NOTE: Pint-pandas is rough right now. Does not natively support other registries, can
 # only assign units by calling .quantify() on data with multi-index units or via strange
 # .astype('pint[units]') syntax, and wraps all data inside pint_array.PintArray objects
@@ -115,32 +116,6 @@ def _parse_columns(columns):
     index = pd.Index(index)  # tuple inputs result in multi-index
     units = ureg.parse_units(units)
     return index, units
-
-
-def interp_budget(data):
-    """
-    Interpolate annual average budget to monthly data.
-
-    Parameters
-    ----------
-    data : pandas.DataFrame
-        The input data with year index.
-
-    Returns
-    -------
-    annual, monthly : pandas.DataFrame
-        The output data with annual average index.
-    """
-    # NOTE: The budget terms e.g. ESRL CO2 actually represent changes between december
-    # january average of each year end so should be cetnered on date 01-01 not 07-01.
-    data, units = data.magnitude, data.units
-    index = data.index.map(lambda year: np.datetime64(f'{year:04d}-01-01'))
-    index.name = 'time'
-    annual = data.set_index(index)
-    annual = ureg.Quantity(annual, units)
-    monthly = annual.resample('MS').interpolate('linear')
-    monthly = ureg.Quantity(monthly, units)
-    return annual, monthly
 
 
 def load_budgets(*sheets, **kwargs):

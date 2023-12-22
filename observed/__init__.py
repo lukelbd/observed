@@ -12,12 +12,13 @@ _warn_observed = partial(warn, category=_ObservedWarning, stacklevel=2)
 
 # Import tools
 from climopy import ureg, vreg, const  # noqa: F401
+from .arrays import *  # noqa: F401, F403
 from .budgets import *  # noqa: F401, F403
 from .datasets import *  # noqa: F401, F403
 from .feedbacks import *  # noqa: F401, F403
 from .indices import *  # noqa: F401, F403
-from .process import *  # noqa: F401, F403
 from .reanalysis import *  # noqa: F401, F403
 from .stations import *  # noqa: F401, F403
 from .surface import *  # noqa: F401, F403
 from .satellite import *  # noqa: F401, F403
+from .tables import *  # noqa: F401, F403

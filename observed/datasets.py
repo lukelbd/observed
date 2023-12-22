@@ -10,7 +10,27 @@ from cmip_data import assign_dates
 from .satellite import load_ceres
 from .surface import load_gistemp, load_hadcrut
 
-__all__ = ['load_dataset', 'load_shared']
+__all__ = ['load_dataset', 'load_external']
+
+
+def _parse_path(option, folder, file):
+    """
+    Parse the input path.
+
+    Parameters
+    ----------
+    option : path-like
+        The user input.
+    folder : str
+        The default folder.
+    file : str
+        The default file.
+    """
+    if isinstance(option, Path):  # TODO: copy for load_dataset()
+        path = folder / option if option.is_dir() else option
+    else:
+        path = Path(folder).expanduser() / (option or file)
+    return path
 
 
 def load_dataset(
@@ -41,7 +61,7 @@ def load_dataset(
     datasets = {'ceres': ceres, 'gistemp': gistemp, 'hadcrut': hadcrut}  # noqa: E501
     if globe:  # He et al. shared data
         rename = dict(ts='ts_he')  # preserve cloud names
-        shared = load_shared(base, time=slice_)
+        shared = load_external(base, time=slice_)
         datasets['shared'] = shared.rename(rename)
     sizes = {
         src: 'x'.join(str(data.sizes.get(key, 1)) for key in ('lon', 'lat'))
@@ -54,9 +74,9 @@ def load_dataset(
     return dataset
 
 
-def load_shared(base=None, ceres=None, gistemp=None, **kwargs):
+def load_external(base=None, ceres=None, gistemp=None, **kwargs):
     """
-    Return a dataset with cloud response and surface temperature from Haozhe He.
+    Return external cloud response and surface temperature data from He et al.
 
     Parameters
     ----------
@@ -73,9 +93,10 @@ def load_shared(base=None, ceres=None, gistemp=None, **kwargs):
     # feedbacks. Otherwise uncertainty much higher.
     # TODO: Here use decode_coords='all' to bypass 'time_bnds' variable that
     # otherwise prohibits xr.open_dataarray(). Should use this elsewhere.
-    base = Path(base or '~/data/shared').expanduser()
-    flux = ceres or 'He_CERES_TOA-cloud_200101-201912_global-anom.nc'
-    flux = xr.open_dataset(base / flux, use_cftime=True)
+    folder = base or '~/data/ceres'
+    file = 'He_CERES_TOA-cloud_200101-201912_global-anom.nc'
+    path = _parse_path(ceres, folder, file)
+    flux = xr.open_dataset(path, use_cftime=True)
     flux = assign_dates(flux)
     flux = flux.squeeze(drop=True)  # remove lon and lat
     for name in flux:
@@ -83,10 +104,11 @@ def load_shared(base=None, ceres=None, gistemp=None, **kwargs):
         part = 'hi' if 'high' in name else 'lo' if 'low' in name else 'mx' if 'mixed' in name else ''  # noqa: E501
         rad = 'rlnt' if 'LW' in name else 'rsnt' if 'SW' in name else 'rfnt'
         flux = flux.rename({name: f'{cloud}{part}_{rad}'.strip('_')})
-    temp = gistemp or 'He_gistemp1200_GHCNv4_ERSSTv5_200101-201912_global-anom.nc'
-    temp = xr.open_dataarray(base / temp, use_cftime=True, decode_coords='all')
+    folder = base or '~/data/gistemp4'
+    file = 'He_gistemp1200_GHCNv4_ERSSTv5_200101-201912_global-anom.nc'
+    path = _parse_path(gistemp, folder, file)
+    temp = xr.open_dataarray(path, use_cftime=True, decode_coords='all')
     temp = assign_dates(temp)
     temp.name = 'ts'  # change from 'tempanomaly'
     data = xr.merge((temp, flux))  # note both are from 2001 to 2019
-    data = data.sel(**kwargs)
-    return data
+    return data.sel(**kwargs)

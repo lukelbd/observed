@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Observed processing utilities.
+Processing utilities for xarray data arrays.
 """
+# TODO: Merge with 'tables.py' and support arbitrary input types. Should leverage
+# public facing abstract-array climopy wrappers. Note that all functions assume
+# dequantified xarrays with units attributes instead of quantified arrays.
 import warnings
 from icecream import ic  # noqa: F401
 
@@ -33,6 +36,11 @@ def annual_average(data, **kwargs):
         The input data.
     **kwargs
         Passed to `annual_filter`.
+
+    Returns
+    -------
+    result : xarray.DataArray
+        The averaged data.
     """
     # WARNING: Critical to drop 'time_bnds' bounds or else trigger error trying to get
     # weighted averages of datetimes. Solved with open_dataarray(decode_coords='all')
@@ -56,9 +64,9 @@ def annual_average(data, **kwargs):
         with xr.set_options(keep_attrs=True):
             numer = (data * days).resample(time=f'AS-{start}')
             denom = (xr.ones_like(data) * days).resample(time=f'AS-{start}')
-            data = numer.sum(dim='time', skipna=False) / denom.sum(dim='time')
-    data.name = name
-    return data
+            result = numer.sum(dim='time', skipna=False) / denom.sum(dim='time')
+    result.name = name
+    return result
 
 
 def annual_filter(data, month=None, anomaly=False, **kwargs):
@@ -75,6 +83,11 @@ def annual_filter(data, month=None, anomaly=False, **kwargs):
         Whether to subtract monthly averages from subselection.
     **kwargs
         Passed to `.sel()`. Use for further subselecttions.
+
+    Returns
+    -------
+    result : xarray.DataArray
+        The filtered data.
     """
     # NOTE: Critical even for monthly regressions to prevent e.g. residual seasonal
     # component in either the climate or the forced response from influencing results.
@@ -90,13 +103,13 @@ def annual_filter(data, month=None, anomaly=False, **kwargs):
         month = data.time[0].dt.month.item()  # integer month
     idxs1, = np.nonzero(months == month)
     idxs2, = np.nonzero(months == (month - 2) % 12 + 1)  # 1 --> 12
-    data = data.isel(time=slice(idxs1[0], idxs2[-1] + 1))
+    result = data.isel(time=slice(idxs1[0], idxs2[-1] + 1))
     if anomaly:  # note data already in anomaly form, but this uses selected period
-        climate = data.groupby('time.month').mean()
+        climate = result.groupby('time.month').mean()
         with xr.set_options(keep_attrs=True):
-            data = data.groupby('time.month') - climate
-        data = data.drop_vars('month')
-    return data
+            result = result.groupby('time.month') - climate
+        result = result.drop_vars('month')
+    return result
 
 
 def detrend_series(data, verbose=False, **kwargs):
@@ -111,6 +124,11 @@ def detrend_series(data, verbose=False, **kwargs):
         Whether to print info on the detrend slope.
     **kwargs
         Passed to `_regress_series`.
+
+    Returns
+    -------
+    result : xarray.DataArray
+        The detrended data.
     """
     # Get trends
     # NOTE: For regional data this will remove regional trends. Then when taking
@@ -127,7 +145,8 @@ def detrend_series(data, verbose=False, **kwargs):
         if isinstance(dof, xr.DataArray) and 'lon' in dof.sizes and 'lat' in dof.sizes:
             dof.attrs.update(units='')
             dof = dof.climo.add_cell_measures()
-            dof = np.round(dof.climo.average('area')).astype(int).item()
+            dof = dof.climo.average('area')
+            dof = np.round(dof).astype(np.int64).item()
         trend = f'{10 * beta.item(): >5.2f}'
         units = data.attrs.get('units', None)
         header = name or 'unknown'
@@ -143,20 +162,20 @@ def detrend_series(data, verbose=False, **kwargs):
         warnings.simplefilter('ignore')
         wgts = fit.time.dt.days_in_month
         wgts = wgts / wgts.sum('time')
-    favg = (wgts * fit).sum('time', skipna=False)
-    anoms = data - fit + favg
+    fmean = (wgts * fit).sum('time', skipna=False)
+    result = data - fit + fmean
     fit = fit.drop_vars(('x', 'y'))
     fit_lower = fit_lower.drop_vars(('x', 'y'))
     fit_upper = fit_upper.drop_vars(('x', 'y'))
-    anoms.name = name
-    anoms.attrs.update(data.attrs)
-    anoms.coords['fit'] = fit
-    anoms.coords['fit_lower'] = fit_lower
-    anoms.coords['fit_upper'] = fit_upper
-    return anoms
+    result.name = name
+    result.attrs.update(data.attrs)
+    result.coords['fit'] = fit
+    result.coords['fit_lower'] = fit_lower
+    result.coords['fit_upper'] = fit_upper
+    return result
 
 
-def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjust=True):  # noqa: E501
+def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjust=True):
     """
     Return regression parameters.
 
@@ -172,6 +191,15 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
         Whether to use percentiles or standard errors. If float this is the %% range.
     adjust : bool or str, optional
         Whether to adjust for degrees of freedom. If string this specifies which.
+
+    Returns
+    -------
+    slope, slope_lower, slope_upper : xarray.dataArray
+        The calculated slope and its uncertainty.
+    dof : xarray.DataArray
+        The calculated degrees of freedom.
+    fit, fit_lower, fit_upper : xarray.DataArray
+        The calculated fit and its uncertainty.
     """
     # Get regression estimates
     # WARNING: Critical to auto-drop 'x', 'y', 'fit', 'fit_lower', and 'fit_upper'
@@ -186,9 +214,13 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
             warnings.simplefilter('ignore')
             months = denom.time.dt.month
         denom = denom.cumsum('time') / len(np.unique(months))
+    numer = numer.climo.dequantify()  # ensure units attribute
+    denom = denom.climo.dequantify()  # ensure units attribute
     numer = numer.drop_vars(numer.coords.keys() - numer.sizes.keys())
     denom = denom.drop_vars(denom.coords.keys() - denom.sizes.keys())
     numer, denom = xr.align(numer, denom)
+    nulls = numer.isnull() | denom.isnull()
+    numer[nulls], denom[nulls] = np.nan, np.nan
     with warnings.catch_warnings():  # datetime64 emits annoying warning
         warnings.simplefilter('ignore')
         if noweight:
@@ -256,33 +288,35 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
     fit.attrs.update(units=numer.units)
     resid = (nsort - fit) ** 2
     resid = (wsort * resid).sum('time', skipna=True)
-    sigma = np.sqrt(resid / dvar / dof)
     danom = wsort * (dsort - davg) ** 2 / dvar
     danom = danom + danom.mean('time', skipna=True)  # tested
-    with xr.set_options(keep_attrs=True):
-        fit_sigma = np.sqrt(danom * resid)  # approximate
-        del_lower, del_upper = var._dist_bounds(fit_sigma, pctile, dof=dof)
-        fit_lower, fit_upper = fit + del_lower, fit + del_upper
-        sigma_lower, sigma_upper = var._dist_bounds(sigma, pctile, dof=dof)
-        slope_lower, slope_upper = slope + sigma_lower, slope + sigma_upper
-    if coords is not None:  # should be equally spaced
-        fits = []
-        for part in (fit, fit_lower, fit_upper):
-            part = part.drop_vars('time').rename(time='denom')
-            part = part.assign_coords(denom=dsort.values)
-            part = part.interp(denom=coords, method='linear', kwargs={'fill_value': 'extrapolate'})  # noqa: E501
-            part = part.drop_vars('denom').rename(denom='time')
-            fits.append(part)
-        fit, fit_lower, fit_upper = fits
-        dsort = xr.DataArray(coords, dims='time')
-        nsort = xr.full_like(dsort, np.nan)
-    fit.coords.update({'x': dsort, 'y': nsort})
-    fit_lower.coords.update({'x': dsort, 'y': nsort})
-    fit_upper.coords.update({'x': dsort, 'y': nsort})
+    ssigma = np.sqrt(resid / dvar / dof)
+    fsigma = np.sqrt(danom * resid)  # approximate
+    bounds = []  # store individual bounds
+    for base, sigma in ((slope, ssigma), (fit, fsigma)):
+        deltas = var._dist_bounds(sigma, pctile, dof=dof, symmetric=True)
+        for delta in deltas:
+            if sigma.ndim == delta.ndim:
+                delta = np.expand_dims(delta, 0)  # add 'pctile' dimension
+            bound = base + xr.DataArray(delta, dims=('pctile', *sigma.dims))
+            if bound.sizes['pctile'] == 1:
+                bound = bound.isel(pctile=0, drop=True)
+            bounds.append(bound)
+    bounds, bnds, fits = bounds[:2], bounds[2:], []
+    for fit in (fit, *bnds):
+        if coords is not None:
+            fit = fit.drop_vars('time').rename(time='denom')
+            fit = fit.assign_coords(denom=dsort.values)
+            fit = fit.interp(denom=coords, method='linear', kwargs={'fill_value': 'extrapolate'})  # noqa: E501
+            fit = fit.drop_vars('denom').rename(denom='time')
+            dsort = xr.DataArray(coords, dims='time')
+            nsort = xr.full_like(dsort, np.nan)
+        fit.coords.update({'x': dsort, 'y': nsort})
+        fits.append(fit)
     # ic((slope_upper - slope_lower) * denom.mean(), (fit_upper - fit_lower).mean())
     # ic(numer.name, denom.name, slope, sigma, slope_lower, slope_upper, dof)
     # ic(fit.mean(), (fit_upper - fit_lower).mean(), fit_upper.mean())
-    return slope, slope_lower, slope_upper, dof, fit, fit_lower, fit_upper
+    return slope, *bounds, dof, *fits
 
 
 def standardize_grid(data):
@@ -293,6 +327,11 @@ def standardize_grid(data):
     ----------
     data : xarray.Dataset or xarray.DataArray
         The input data.
+
+    Returns
+    -------
+    result : xarray.DataArray
+        The standardized data.
     """
     # TODO: Translate the following bash code to pycdo. See cmip_data process.py
     # for folder in ceres gistemp4 hadcrut5; do

@@ -3,12 +3,13 @@
 Get scalar climate oscillation indices.
 """
 # TODO: Revisit and merge with 'sst-bias' analysis utilities.
+import itertools
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from icecream import ic  # noqa: E501
+from icecream import ic  # noqa: F401
 
 __all__ = ['load_index', 'load_indices']
 
@@ -36,7 +37,7 @@ __all__ = ['load_index', 'load_indices']
 # See: https://psl.noaa.gov/data/timeseries/AMO/
 # See: https://psl.noaa.gov/gcos_wgsp/Timeseries/
 # See: https://climatedataguide.ucar.edu/climate-data/overview-climate-indices
-INDEX_CODES = {'ao': 'nam', 'aao': 'sam', 'nino34': 'nino'}
+INDEX_CODES = {'ao': 'nam', 'aao': 'sam', 'nino34': 'nino', 'nino3.4': 'nino'}
 INDEX_FILES = {
     'nino': ('ersst5.nino.mth.91-20.ascii.txt', 'nino34.long.anom.data.txt'),  # CPC ERSST vs. JPL HadSST  # noqa: E501
     'soi': ('soi.data.txt', 'soi.dat.txt'),  # JPL/CPC source vs. CRU source
@@ -48,7 +49,7 @@ INDEX_FILES = {
     'qbo': 'qbo.data.txt',
 }
 INDEX_LABELS = {
-    'nino': 'Niño-3.4 Temperature Index',
+    'nino': 'Niño-3.4 Temperature',
     'soi': 'Southern Oscillation Index',
     'pdo': 'Pacific Decadal Oscillation',
     'amo': 'Atlantic Multidecadal Oscillation',
@@ -77,18 +78,19 @@ def load_indices(*indices, cru=None, **kwargs):
     tuples = [index for index, file in INDEX_FILES.items() if not isinstance(file, str)]
     default = tuples if cru else INDEX_FILES
     sources = ('cpc', 'cru') if cru is None else ('cru',) if cru else ('cpc',)
-    indices = [INDEX_CODES.get(index, index) for index in indices]
-    indices = indices or default
-    datas = {}
-    for index in indices:
-        for source in sources:
-            if cru is None and source == 'cru' and index not in tuples:
-                continue
-            kwargs.update(cru=source == 'cru')
-            data = load_index(index, **kwargs)
-            datas[(index, source)] = data
+    codes = [INDEX_CODES.get(index, index) for index in indices]
+    codes = codes or default
+    datas, attrs = {}, {}
+    for code, source in itertools.product(codes, sources):
+        if cru is None and source == 'cru' and code not in tuples:
+            continue
+        kwargs.update(cru=source == 'cru')
+        data = load_index(code, **kwargs)
+        datas[code, source] = data
+        attrs[code] = data.attrs
     data = pd.concat(datas.values(), keys=datas.keys(), axis='columns')
     data.columns.names = ('index', 'source')
+    data.attrs = attrs
     return data
 
 
@@ -110,28 +112,28 @@ def load_index(index, base=None, cru=False):
     # NOTE: See above for details. Generally have either CRU or CPC versions that use
     # either HadSSST or ERSST. The non-SST indices are also different between versions.
     base = Path(base or '~/data/indices').expanduser()
-    index = INDEX_CODES.get(index, index)
+    code = INDEX_CODES.get(index, index)
     index_col = 0
     skipfooter = 0
     skiprows = 0  # default
     usecols = None  # default
     header = None  # default
-    if index in ('nam', 'sam'):
+    if code in ('nam', 'sam'):
         header = 0
         skipfooter = 0
-    elif index in ('nao', 'soi'):
+    elif code in ('nao', 'soi'):
         skiprows, usecols = 1, range(13)  # shared
         skipfooter = 0 if cru else 3
-    elif index == 'amo':
+    elif code == 'amo':
         skiprows, header = (1, None) if cru else (1, 0)
         index_col = 0 if cru else (0, 1)
-    elif index == 'pdo':
+    elif code == 'pdo':
         skiprows, header = ((*range(30), 31), 0) if cru else (1, 0)
         skipfooter = 12 if cru else 0
-    elif index == 'nino':
+    elif code == 'nino':
         skiprows, header = (1, None) if cru else (0, 0)
         skipfooter, index_col = (7, 0) if cru else (0, (0, 1))
-    elif index == 'qbo':
+    elif code == 'qbo':
         skiprows = 1
         skipfooter = 6
     else:
@@ -140,11 +142,11 @@ def load_index(index, base=None, cru=False):
     # Open data and convert to series
     # NOTE: Pandas colspecs='infer' seems to account for skiprows but not skipfooter,
     # so critical to reduce 'infer_nrows' from default of 100 for shorter datasets.
-    options = INDEX_FILES[index]
+    options = INDEX_FILES[code]
     options = (options,) if isinstance(options, str) else options
     nulls = (99.9, 99.99, 999, 999.9)
     if cru and len(options) == 1:
-        raise ValueError(f'CRU version unavailable for climate index {index!r}.')
+        raise ValueError(f'CRU version unavailable for climate index {code!r}.')
     file = options[int(bool(cru))]
     data = pd.read_fwf(
         base / file,
@@ -164,9 +166,9 @@ def load_index(index, base=None, cru=False):
     if data.index.nlevels == 2:
         if data.columns.size == 1:  # enforce name for check at the bottom
             data.columns = ('anom',)
-        if data.columns.size > 1 and index == 'nino':  # duplicates are e.g. 'anom.1'
-            loc = data.columns.str.lower().get_loc('nino3.4')  # Nino3.4 absolutes
-            data = data.iloc[:, loc + 1:loc + 2]  # adjacent anomalies
+        if data.columns.size > 1 and code == 'nino':  # duplicates are e.g. 'anom.1'
+            iloc = data.columns.str.lower().get_loc('nino3.4')  # Nino3.4 absolutes
+            data = data.iloc[:, iloc + 1:iloc + 2]  # adjacent anomalies
         if data.columns.size > 1 or 'anom' not in data.columns[0].lower():
             raise RuntimeError(f'Error parsing {file!r}. Invalid columns {data.columns}.')  # noqa: E501
     else:
@@ -176,9 +178,16 @@ def load_index(index, base=None, cru=False):
             months = 1 + data.columns.values - data.columns.values.min()
         else:  # note strptime() seems case insensitive for month abbreviations
             months = [datetime.strptime(val, '%b').month for val in data.columns.values]
-        data = data.set_axis(months, axis='columns').stack()
+        data = data.set_axis(months, axis='columns')
+        data = data.stack(dropna=False)  # WARNING: default behavior drops rows
     time = [f'{y:04d}-{m:02d}-01' for y, m in data.index]
+    attrs = {}
+    attrs['code'] = code.upper()
+    attrs['units'] = ''
+    attrs['long_name'] = INDEX_LABELS[code]  # climate index label
+    attrs['short_name'] = ' '.join(INDEX_LABELS[code].split()[:-1])  # remove last word
     data = data.squeeze()  # convert to pandas series
-    data.name = index
-    data.index = pd.DatetimeIndex(time, name='time')  # noqa: E501
+    data.name = index  # standard name
+    data.index = pd.DatetimeIndex(time, name='time')
+    data.attrs = attrs
     return data

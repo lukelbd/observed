@@ -12,7 +12,7 @@ from climopy import var, ureg, vreg  # noqa: F401
 from coupled.process import get_data
 from cmip_data.feedbacks import _feedbacks_from_fluxes
 
-from .process import annual_average, annual_filter, detrend_series, regress_series
+from .arrays import annual_average, annual_filter, detrend_series, regress_series
 
 __all__ = ['annual_average', 'annual_filter', 'calc_feedback', 'process_feedbacks']
 

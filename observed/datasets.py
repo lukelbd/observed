@@ -34,7 +34,7 @@ def _parse_path(option, folder, file):
 
 
 def load_dataset(
-    base=None, ceres=None, ceres0=None, gistemp=None, hadcrut=None, globe=True,
+    base=None, ceres=None, ceres0=None, gistemp=None, hadcrut=None, average=True,
 ):
     """
     Return a dataset with radiative flux and surface temperature observations.
@@ -47,19 +47,19 @@ def load_dataset(
         The CERES file and climatology name.
     gistemp, hadcrut : path-like, optional
         The GISTEMP4 and HadCRUT5 file name.
-    globe : bool, optional
+    average : bool, optional
         Whether to load global data.
     """
-    ceres = load_ceres(base, ceres, clim=ceres0, globe=globe)
+    ceres = load_ceres(base, ceres, clim=ceres0, average=average)
     slice_ = slice(ceres.time.values[0], ceres.time.values[-1])
     rename = dict(ts='ts_gis')  # rename single variable
-    gistemp = load_gistemp(base, gistemp, globe=globe, time=slice_)
+    gistemp = load_gistemp(base, gistemp, average=average, time=slice_)
     gistemp = gistemp.rename(rename)
     rename = dict(ts='ts_had', ts_lower='ts_had_lower', ts_upper='ts_had_upper')
-    hadcrut = load_hadcrut(base, hadcrut, globe=globe, time=slice_)
-    hadcrut = hadcrut.rename(rename if globe else dict(ts='ts_had'))
+    hadcrut = load_hadcrut(base, hadcrut, average=average, time=slice_)
+    hadcrut = hadcrut.rename(rename if average else dict(ts='ts_had'))
     datasets = {'ceres': ceres, 'gistemp': gistemp, 'hadcrut': hadcrut}  # noqa: E501
-    if globe:  # He et al. shared data
+    if average:  # He et al. shared data
         rename = dict(ts='ts_he')  # preserve cloud names
         shared = load_external(base, time=slice_)
         datasets['shared'] = shared.rename(rename)

@@ -202,12 +202,16 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
         The calculated fit and its uncertainty.
     """
     # Get regression estimates
-    # WARNING: Critical to auto-drop 'x', 'y', 'fit', 'fit_lower', and 'fit_upper'
-    # coordinates left over from detrending or else get weird hard-to-debug errors.
     # NOTE: For details see coupled.process._components_slope (uses climo.linefit) and
     # cmip_data.feedbacks._regress_monthly. Combines 'linefit' behavior returning extra
-    # uncertainty parameters and '_regress_monthly' weighting behavior plus fixes
-    # Thompson et al. standard error issue. Should add to climopy in future
+    # uncertainty parameters and '_regress_monthly' weighting behavior. Also note it
+    # is critical to auto-drop 'x', 'y', 'fit', 'fit_lower', and 'fit_upper' coords
+    # left over from detrending or else get weird hard-to-debug errors (see below).
+    # TODO: Move this into climopy linefit(). Currently 'institute-factor' does not
+    # support percentile bounds, optionally disabling autocorrelation adjustment, or
+    # optionally using other series for autocorrelation adjustment, and 'monde-updates'
+    # does not support weighted regressions or weighted uncertainty bounds and does
+    # not auto-detrend the series used for adjustment.
     if denom.name == 'time':  # assume identical spacing
         denom = xr.ones_like(denom, numer.dtype)
         with warnings.catch_warnings():  # datetime64 emits annoying warning
@@ -251,17 +255,20 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
         factor = 1
         dof = numer.time.size - 2
     else:  # serial correlation
-        if not isinstance(adjust, str):
-            seq = numer - (offset + denom * slope)  # correlate in *time*
-            savg = (wgts * seq).sum('time', skipna=True)
-        elif adjust == 'y':
-            seq = numer  # correlate in *time*
-            savg = navg
-        elif adjust == 'x':
-            seq = denom  # correlate in *time*
-            savg = davg
-        else:
-            raise ValueError(f"Invalid {adjust=}. Must be 'x' or 'y'.")
+        with xr.set_options(keep_attrs=True):
+            if not isinstance(adjust, str):
+                seq = numer - (offset + denom * slope)  # correlate in *time*
+                savg = (wgts * seq).sum('time', skipna=True)
+            elif adjust == 'y':
+                seq = numer  # correlate in *time*
+                savg = navg
+            elif adjust == 'x':
+                seq = denom  # correlate in *time*
+                savg = davg
+            else:
+                raise ValueError(f"Invalid {adjust=}. Must be 'x' or 'y'.")
+        seq = detrend_series(seq, noweight=noweight, adjust=False)
+        savg = (wgts * seq).sum('time', skipna=True)
         seq1 = seq.isel(time=slice(1, None))
         seq2 = seq.isel(time=slice(None, -1))
         seq2 = seq2.assign_coords(time=seq1.time.values)  # avoid alignment!
@@ -270,7 +277,6 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
         autocorr = np.clip(autocov / scale, 0, None)
         factor = ((1 - autocorr) / (1 + autocorr))  # effective samples
         dof = numer.time.size * factor - 2  # see above
-        dof = np.round(dof).astype(np.int64)
         dof = dof.item() if dof.size == 1 else dof
 
     # Get standard error and fit terms
@@ -304,14 +310,16 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
             bounds.append(bound)
     bounds, bnds, fits = bounds[:2], bounds[2:], []
     for fit in (fit, *bnds):
-        if coords is not None:
+        if coords is None:
+            xdata, ydata = dsort, nsort
+        else:
             fit = fit.drop_vars('time').rename(time='denom')
             fit = fit.assign_coords(denom=dsort.values)
             fit = fit.interp(denom=coords, method='linear', kwargs={'fill_value': 'extrapolate'})  # noqa: E501
             fit = fit.drop_vars('denom').rename(denom='time')
-            dsort = xr.DataArray(coords, dims='time')
-            nsort = xr.full_like(dsort, np.nan)
-        fit.coords.update({'x': dsort, 'y': nsort})
+            xdata = xr.DataArray(coords, dims='time')
+            ydata = xr.full_like(xdata, np.nan)
+        fit.coords.update({'x': xdata, 'y': ydata})
         fits.append(fit)
     # ic((slope_upper - slope_lower) * denom.mean(), (fit_upper - fit_lower).mean())
     # ic(numer.name, denom.name, slope, sigma, slope_lower, slope_upper, dof)

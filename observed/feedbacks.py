@@ -137,15 +137,17 @@ def calc_feedback(
     # Get the data arrays
     # NOTE: Critical to pass time=None or else time average taken automatically. Note
     # flux components e.g. 'rfnt' will be auto-derived from e.g. 'rsdt' 'rsut' 'rlut'.
-    from coupled.specs import _pop_kwargs  # TODO: move this
     src = src or 'gis'  # used in name
     wav = wav or 'f'  # default full
-    adjust = kwargs.get('adjust', None)
-    pctile = kwargs.get('pctile', None)  # see regress_series
     kw_names = dict(src=src, wav=wav, sky=sky, cld=cld, sfc=sfc)
-    kw_annual = _pop_kwargs(kwargs, annual_filter)
+    try:
+        from coupled.specs import _pop_kwargs  # TODO: move this
+        kw_annual = _pop_kwargs(kwargs, annual_filter)
+    except ImportError:
+        keys_annual = ('month', 'anomaly')
+        kw_annual = {key: kwargs.pop(key) for key in keys_annual if key in kwargs}
     kw_regress = kwargs.copy()
-    kw_detrend = {**kwargs, 'adjust': bool(adjust)}
+    kw_detrend = {**kwargs, 'adjust': False}
     if len(args) not in (0, 2):
         raise ValueError(f'Expected 0 or 2 positional arguments but got {len(args)}.')
     if args:  # manual specification
@@ -177,14 +179,14 @@ def calc_feedback(
     starts = [0]  # regression index
     scale = 1 if annual else 12
     size = flux.size  # regression size
-    step = 5  # every 5 years
-    lams, dofs, fits = [], [], []
+    lams, lams_lower, lams_upper = [], [], []
+    dofs, fits, fits_lower, fits_upper = [], [], [], []
     if bootstrap:
         size = 20 if bootstrap is True else bootstrap
         coords = np.linspace(np.min(temp), np.max(temp), 100)
-        if size % step != 0:
-            raise ValueError(f'Bootstrap years {bootstrap} must be multiple of five.')
-        size, step = size * scale, step * scale
+        if size % 2:
+            raise ValueError(f'Number of bootstrap years {bootstrap} must be even.')
+        size, step = size * scale, size * scale // 2
         starts = np.arange(0, flux.size - size + 1, step)  # uses full record
     for start in starts:
         datas = []
@@ -197,37 +199,43 @@ def calc_feedback(
         result = regress_series(*datas, coords=coords, **kw_regress)
         lam, lam_lower, lam_upper, dof, fit, fit_lower, fit_upper = result
         lams.append(lam)
+        lams_lower.append(lam_lower)
+        lams_upper.append(lam_upper)
         dofs.append(dof)
         fits.append(fit)
+        fits_lower.append(fit_lower)
+        fits_upper.append(fit_upper)
 
     # Combine results
     # NOTE: Use percentiles informed from standard deviation normal distribution
     # instead of ensemble since needed for figures.py bootstrap constraint methodology
     # TODO: Consider alternative method from Dessler + Forster randomly sampling
     # points from full time series instead of contiguous segements.
+    # TODO: Consider scipy stats-style model class objects that calculate
+    # and return different products upon request (e.g. fits and percentiles).
+    # lam, dof = lams.mean(), np.mean(dofs)
+    # lam_sigma = lams.std(dim='sample', ddof=1)  # unbiased normal sigma estimator
+    # lam_lower, lam_upper = var._dist_bounds(lam_sigma, pctile, dof=)
+    # lam_lower = xr.DataArray(lam_lower, attrs=lam.attrs)
+    # lam_upper = xr.DataArray(lam_upper, attrs=lam.attrs)
     if bootstrap:
-        coords = dict(fits[0].coords)
-        lams = xr.concat(lams, dim='sample', coords='minimal', compat='override')
-        fits = xr.concat(fits, dim='sample', coords='minimal', compat='override')
-        lam, dof = lams.mean(), np.mean(dofs)
-        lam_sigma = lams.std(ddof=1)  # unbiased normal sigma estimator
-        lam_lower, lam_upper = var._dist_bounds(lam_sigma, pctile)  # False == sigma
-        lam_lower = xr.DataArray(lam_lower, attrs=lam.attrs)
-        lam_upper = xr.DataArray(lam_upper, attrs=lam.attrs)
-        fit = fits  # return entire distribution not mean
-        fit_sigma = fits.std(dim='sample', ddof=1)  # unbiased normal sigma estimator
-        fit_lower, fit_upper = var._dist_bounds(fit_sigma, pctile)  # Flase == sigma
-        fit.assign_coords(coords)
-        fit_lower = xr.DataArray(fit_lower, dims=fit_sigma.dims, coords=coords)
-        fit_upper = xr.DataArray(fit_upper, dims=fit_sigma.dims, coords=coords)
-    slope = f'{flux.name}_lam_{src}'
-    line = f'{flux.name}_fit_{src}'
-    lam.name = slope
-    lam_lower.name = f'{slope}_lower'
-    lam_upper.name = f'{slope}_upper'
-    fit.name = line
-    fit_lower.name = f'{line}_lower'
-    fit_upper.name = f'{line}_lower'
+        kw_concat = dict(dim='sample', coords='minimal', compat='override')
+        coords = dict(fits[0].coords)  # standardized dependent coordinates
+        lam = xr.concat(lams, **kw_concat)
+        lam_lower = xr.concat(lams_lower, **kw_concat)
+        lam_upper = xr.concat(lams_upper, **kw_concat)
+        dof = xr.DataArray(dofs, dims='sample')
+        fit = xr.concat(fits, **kw_concat).assign_coords(coords)
+        fit_lower = xr.concat(fits_lower, **kw_concat).assign_coords(coords)
+        fit_upper = xr.concat(fits_upper, **kw_concat).assign_coords(coords)
+    lam_name = f'{flux.name}_lam_{src}'
+    fit_name = f'{flux.name}_fit_{src}'
+    lam.name = lam_name
+    lam_lower.name = f'{lam_name}_lower'
+    lam_upper.name = f'{lam_name}_upper'
+    fit.name = fit_name
+    fit_lower.name = f'{fit_name}_lower'
+    fit_upper.name = f'{fit_name}_lower'
     return lam, lam_lower, lam_upper, dof, fit, fit_lower, fit_upper
 
 

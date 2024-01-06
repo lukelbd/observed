@@ -15,7 +15,7 @@ from cmip_data.utils import assign_dates
 __all__ = ['load_ceres', 'load_erbe']
 
 
-def load_ceres(base=None, file=None, clim=None, globe=True, anomaly=True, **kwargs):
+def load_ceres(base=None, file=None, clim=None, average=True, anomaly=True, **kwargs):
     """
     Return a dataset with CERES EBF radiative flux estimates.
 
@@ -25,10 +25,10 @@ def load_ceres(base=None, file=None, clim=None, globe=True, anomaly=True, **kwar
         The directory and file name.
     clim : path-like
         The climatology file name.
+    average : bool, optional
+        Whether to load global data.
     anomaly : bool, optional
         Whether to compute anomalies.
-    globe : bool, optional
-        Whether to load global data.
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
@@ -37,7 +37,7 @@ def load_ceres(base=None, file=None, clim=None, globe=True, anomaly=True, **kwar
     # 2003-2019, and NOAA20 afterwards. Product includes bias and drift corrections
     # to prevent discontinuity when satellites change (however could try to detect).
     base = Path(base or '~/data/ceres').expanduser()
-    if globe:
+    if average:
         file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202302_global.nc'
         clim = clim or 'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_global.nc'
     else:
@@ -102,10 +102,10 @@ def load_erbe(base=None):
         The directory and file name.
     clim : path-like
         The climatology file name.
+    average : bool, optional
+        Whether to load global data.
     anomaly : bool, optional
         Whether to compute anomalies.
-    globe : bool, optional
-        Whether to load global data.
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """

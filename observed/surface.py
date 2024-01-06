@@ -17,7 +17,7 @@ from cmip_data.utils import assign_dates
 __all__ = ['load_gistemp', 'load_hadcrut']
 
 
-def load_gistemp(base=None, file=None, globe=True, **kwargs):
+def load_gistemp(base=None, file=None, average=True, **kwargs):
     """
     Return a dataset with GISTEMP surface temperature estimates.
 
@@ -25,7 +25,7 @@ def load_gistemp(base=None, file=None, globe=True, **kwargs):
     ----------
     base, file : path-like
         The directory and file name.
-    globe : bool, optional
+    average : bool, optional
         Whether to load global data.
     **kwargs
         Passed to `xarray.Dataset.sel`.
@@ -34,7 +34,7 @@ def load_gistemp(base=None, file=None, globe=True, **kwargs):
     # NOTE: This is adapted from utils.assign_dates(). Should not bother
     # implementing there since this is special case.
     base = Path(base or '~/data/gistemp4').expanduser()
-    if globe:
+    if average:
         path = file or 'gistemp1200_GHCNv4_ERSSTv5_global.csv'
     else:
         path = file or 'gistemp1200_GHCNv4_ERSSTv5_standardized.nc'
@@ -57,13 +57,13 @@ def load_gistemp(base=None, file=None, globe=True, **kwargs):
         data = data.to_dataset(name='ts').stack(time=('year', 'month'))
         time = [cftime.datetime(y, m, 15) for y, m in zip(data.year.values, data.month.values)]  # noqa: E501
         time = xr.DataArray(xr.CFTimeIndex(time), dims='time')
-        data = data.drop_vars(('month', 'year'))
+        data = data.drop_vars(data.keys() & {'month', 'year'})
         data = data.assign_coords(time=time)
         data.ts.attrs.update({'units': 'K', 'long_name': 'surface temperature'})
     return data.sel(**kwargs)
 
 
-def load_hadcrut(base=None, file=None, globe=True, **kwargs):
+def load_hadcrut(base=None, file=None, average=True, **kwargs):
     """
     Return a dataset with HadCRUT surface temperature estimates.
 
@@ -71,8 +71,8 @@ def load_hadcrut(base=None, file=None, globe=True, **kwargs):
     ----------
     base, file : path-like
         The directory and file name.
-    globe : bool, optional
-        Whether to load global data.
+    average : bool, optional
+        Whether to load global averages.
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
@@ -81,7 +81,7 @@ def load_hadcrut(base=None, file=None, globe=True, **kwargs):
     # TODO: Also include observational uncertainty of individual time series,
     # not just Gregory regression uncertainty like in He et al.?
     base = Path(base or '~/data/hadcrut5').expanduser()
-    if globe:
+    if average:
         path = file or 'HadCRUT.5.0.1.0.analysis.summary_series.global.monthly.nc'
     else:
         path = file or 'HadCRUT.5.0.1.0.analysis.anomalies.ensemble_mean_standardized.nc'  # noqa: E501

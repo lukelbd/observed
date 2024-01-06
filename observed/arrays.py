@@ -253,7 +253,7 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
     # See: https://en.wikipedia.org/wiki/Simple_linear_regression#Normality_assumption
     if not adjust:  # no adjustment
         factor = 1
-        dof = numer.time.size - 2
+        dof = np.array(numer.time.size - 2)
     else:  # serial correlation
         with xr.set_options(keep_attrs=True):
             if not isinstance(adjust, str):
@@ -277,7 +277,9 @@ def regress_series(numer, denom, coords=None, noweight=False, pctile=True, adjus
         autocorr = np.clip(autocov / scale, 0, None)
         factor = ((1 - autocorr) / (1 + autocorr))  # effective samples
         dof = numer.time.size * factor - 2  # see above
-        dof = dof.item() if dof.size == 1 else dof
+    dof = dof.astype(np.float64)
+    dof = xr.full_like(slope, dof)
+    dof.attrs['units'] = ''
 
     # Get standard error and fit terms
     # NOTE: See process.py _components_slope() for details. Here do not need 'pctile'

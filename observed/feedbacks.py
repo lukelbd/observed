@@ -2,6 +2,7 @@
 """
 Get observational forcing-feedback estimates.
 """
+import itertools
 import os
 from pathlib import Path
 from icecream import ic  # noqa: F401
@@ -12,25 +13,31 @@ from climopy import var, ureg, vreg  # noqa: F401
 from coupled.process import get_data
 from cmip_data.feedbacks import _feedbacks_from_fluxes
 
+from .datasets import load_dataset
 from .arrays import annual_average, annual_filter, detrend_series, regress_series
 
-__all__ = ['annual_average', 'annual_filter', 'calc_feedback', 'process_feedbacks']
-
+__all__ = [
+    'annual_average',
+    'annual_filter',
+    'calc_feedback',
+    'process_feedbacks',
+    'process_scalar',
+]
 
 # Flux labels
-SRC_LABELS = {
+LABELS_SRC = {
     'he': 'He et al.',
     'gis': 'GISTEMP4',
     'had': 'HadCRUT5',
 }
-WAV_LABELS = {
+LABELS_WAV = {
     'f': 'net',
     'l': 'longwave',
     's': 'shortwave',
     'u': 'reflected',
     'd': 'insolation',
 }
-CLD_LABELS = {
+LABELS_CLD = {
     '': 'all-sky',
     'cs': 'clear-sky',
     'ce': 'cloud effect',
@@ -40,26 +47,17 @@ CLD_LABELS = {
     'cldmx': 'He et al. mixed-cloud',
 }
 
-# Trend labels
-DETREND_LABELS = {
-    0: 'including trend',
-    1: 'flux detrended',
-    2: 'temp detrended',
-    3: 'both detrended'
+# Keyword argument for scalar feedback calculations
+OPTIONS_DEFAULT = {
+    'wav': ('f', 'l', 's'),  # separate variable
+    'sky': ('', 'ce', 'cld'),  # separate variable
+    'src': ('gis', 'had'),
+    'annual': (False, True),
+    'anomaly': (False, True),
+    'detrend': (3, 2, 1, 0),
+    'adjust': ('r', 'y', 'x', ''),
 }
-PERIOD_LABELS = {  # model results
-    (0, 20): 'early response',
-    (1, 20): 'early response',
-    (2, 20): 'early response',
-    (20, 150): 'late response',
-    (0, 150): 'full response',
-    (1, 150): 'full response',
-    (2, 150): 'full response',
-}
-
-# Keywords for regressions ('annual' goes from plot_feedback -> calc_feedback)
-KEYS_ANNUAL = ('annual', 'month', 'anomaly', 'time')
-KEYS_REGRESS = (*KEYS_ANNUAL, 'bootstrap', 'noweight', 'pctile', 'adjust')
+OPTIONS_TESTING = {key: value[:2] for key, value in OPTIONS_DEFAULT.items()}
 
 
 def get_parts(src=None, wav=None, sky=None, cld=None, sfc=None):
@@ -93,15 +91,15 @@ def get_parts(src=None, wav=None, sky=None, cld=None, sfc=None):
     fluxes = tuple(f'{cld}_{rad}' if cld else f'{rad}{sky}' for rad in rads)
     prefix = 'ts-' + '-'.join(srcs)
     suffix = cld if cld is not None else sky
-    templabels = [SRC_LABELS[src] for src in srcs]
-    fluxlabels = [f'{WAV_LABELS[wav].title()} {CLD_LABELS[suffix]}' for wav in wavs]
+    templabels = [LABELS_SRC[src] for src in srcs]
+    fluxlabels = [f'{LABELS_WAV[wav].title()} {LABELS_CLD[suffix]}' for wav in wavs]
     pathlabel = '_'.join(filter(None, (prefix, '-'.join(rads), suffix)))
     return temps, fluxes, templabels, fluxlabels, pathlabel
 
 
 def calc_feedback(
     dataset, *args, src=None, wav=None, sky=None, cld=None, sfc=None,
-    annual=False, bootstrap=False, detrend=False, verbose=False, **kwargs,
+    annual=False, variability=False, detrend=False, verbose=False, **kwargs,
 ):
     """
     Return climate feedback calculation for global time series.
@@ -114,10 +112,10 @@ def calc_feedback(
         The optional explicit variable names.
     annual : bool, optional
         Whether to use annual averages.
-    bootstrap : bool or int, optional
-        Whether to get bootstrapped average feedbacks. If `int` these are the years.
-    detrend : bool or int, default: False
-        Whether to detrend the data. ``1`` is ``R``, ``2`` is ``T``, ``3`` both.
+    variability : bool or int, optional
+        Whether to estimate uncertainty from internal variability or the years to use.
+    detrend : bool or str, default: False
+        Whether to detrend the data. Use ``'x'`` for temperature and ``'y'`` for flux.
     verbose : bool or int, optional
         Whether to print a message after detrending. ``1`` is ``R``, ``2`` is ``T``.
     src, wav, sky, cld, sfc : optional
@@ -154,11 +152,11 @@ def calc_feedback(
         temp, flux = args
     else:
         (temp,), (flux,), *_ = get_parts(**kw_names)
-    if detrend == 3 or detrend is True:  # note 1 == True
+    if detrend in ('xy', 'yx') or detrend is True:
         idxs = (1, 0)
-    elif detrend == 2:  # temp only
+    elif detrend == 'x':  # temp only
         idxs = (1,)
-    elif detrend == 1:  # flux only
+    elif detrend == 'y':  # flux only
         idxs = (0,)
     elif not detrend:
         idxs = ()
@@ -181,11 +179,11 @@ def calc_feedback(
     size = flux.size  # regression size
     lams, lams_lower, lams_upper = [], [], []
     dofs, fits, fits_lower, fits_upper = [], [], [], []
-    if bootstrap:
-        size = 20 if bootstrap is True else bootstrap
+    if variability:
+        size = 20 if variability is True else variability
         coords = np.linspace(np.min(temp), np.max(temp), 100)
         if size % 2:
-            raise ValueError(f'Number of bootstrap years {bootstrap} must be even.')
+            raise ValueError(f'Number of variability years {variability} must be even.')
         size, step = size * scale, size * scale // 2
         starts = np.arange(0, flux.size - size + 1, step)  # uses full record
     for start in starts:
@@ -208,7 +206,7 @@ def calc_feedback(
 
     # Combine results
     # NOTE: Use percentiles informed from standard deviation normal distribution
-    # instead of ensemble since needed for figures.py bootstrap constraint methodology
+    # instead of ensemble since needed for figures.py variability constraint methodology
     # TODO: Consider alternative method from Dessler + Forster randomly sampling
     # points from full time series instead of contiguous segements.
     # TODO: Consider scipy stats-style model class objects that calculate
@@ -218,7 +216,7 @@ def calc_feedback(
     # lam_lower, lam_upper = var._dist_bounds(lam_sigma, pctile, dof=)
     # lam_lower = xr.DataArray(lam_lower, attrs=lam.attrs)
     # lam_upper = xr.DataArray(lam_upper, attrs=lam.attrs)
-    if bootstrap:
+    if variability:
         kw_concat = dict(dim='sample', coords='minimal', compat='override')
         coords = dict(fits[0].coords)  # standardized dependent coordinates
         lam = xr.concat(lams, **kw_concat)
@@ -239,17 +237,14 @@ def calc_feedback(
     return lam, lam_lower, lam_upper, dof, fit, fit_lower, fit_upper
 
 
-def process_feedbacks(
-    dataset, output=None, source=None, style=None, **kwargs
-):
+def process_feedbacks(dataset=None, output=None, source=None, style=None, **kwargs):
     """
-    Calculate climate feedbacks using cmip_data 'process.py' and 'feedbacks.py'
-    utilities and save the result. Then 'results.py' can optionally load.
+    Save climate feedbacks using `cmip_data.process` and `cmip_data.feedbacks`.
 
     Parameters
     ----------
-    dataset : xarray.Dataset
-        The input dataset.
+    dataset : xarray.Dataset, optional
+        The input dataset. Default is ``load_dataset(globe=True)``.
     output : path-like, optional
         The output directory.
     source : {'gistemp', 'hadcrut'}, optional
@@ -269,6 +264,8 @@ def process_feedbacks(
     style = style or 'monthly'
     source = source or 'gistemp'
     kw_feedbacks = dict(style=style, components=('', 'cs'), boundaries=('t',))
+    if dataset is None:  # load local observations
+        dataset = load_dataset(globe=False)
     if not isinstance(dataset, xr.Dataset):
         raise ValueError('Input argument must be a dataset.')
     if source not in ('gistemp', 'hadcrut'):
@@ -286,11 +283,9 @@ def process_feedbacks(
     feedbacks = _feedbacks_from_fluxes(dataset, **kw_feedbacks)
 
     # Save feedback data
-    # Facets: (project, model, experiment, ensemble)
-    # ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')  # noqa: E501
-    # Version: (source, style, region, start, stop)
-    # ('gis|had', 'style', year1, year2)
-    # TODO: Copy this style of specifying either output folder or file to plotting.py
+    # TODO: Copy below style of specifying either output folder or file to plotting.py
+    # Facets: ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')
+    # Version: ('gis|had', 'monthly|annual', 'region', year1, year2)
     start = dataset.time[0].dt.year.item()
     stop = dataset.time[-1].dt.year.item()
     head = 'feedbacks_Amon_CERES_historical_r1i1p1f1'
@@ -306,5 +301,86 @@ def process_feedbacks(
     if not base.is_dir():
         raise ValueError(f'Invalid output location {base}.')
     print(f'Saving file: {file}')
+    feedbacks.to_netcdf(base / file)
+    return feedbacks
+
+
+def process_scalar(dataset=None, output=None, testing=None, **kwargs):
+    """
+    Save scalar climate feedbacks and uncertainty using `observed.calc_feedbacks`.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset, optional
+        The input dataset. Default is ``load_dataset(globe=False)``.
+    output : path-like, optional
+        The output directory.
+    default : bool, optional
+    **kwargs
+        Passed to `calc_feedbacks`.
+    """
+    # Create dataset and calculate feedbacks
+    # NOTE: Unlike 'coupled' feedback calculations this has coordinates for several
+    # variant calculations. In future should allow this for non-scalar estimates.
+    if dataset is None:  # load global average observations
+        dataset = load_dataset(globe=True)
+    kwargs = {
+        key: value if isinstance(value, (list, tuple)) else (value,)
+        for key, value in kwargs.items()
+    }
+    options = OPTIONS_TESTING if testing else OPTIONS_DEFAULT
+    kwargs = kwargs or options
+    names, feedbacks = [], []
+    print('Calculating feedbacks:', end=' ')
+    for values in itertools.product(*kwargs.values()):
+        # print('Options:', ', '.join(f'{key}={val!r}' for key, val in kwargs.items()))
+        kw = dict(zip(kwargs, values))
+        kw.update(verbose=False)
+        kw['cld'] = kw.pop('sky') if 'cld' in kw.get('sky') else ''
+        lam, spread1, spread2, dof, *_ = calc_feedback(dataset, pctile=True, **kw)
+        lam, sigma1, sigma2, *_ = calc_feedback(dataset, pctile=False, **kw)
+        cld, wav, sky = kw.pop('cld', ''), kw.pop('wav', 'f'), kw.pop('sky', '')
+        name = f'{cld}_r{wav}nt{sky}'.strip('_')
+        if name not in names:
+            print(name, end=' ')
+            names.append(name)
+        kw['source'] = kw.pop('src', 'gis')
+        kw['style'] = kw.pop('annual', '') and 'annual' or 'monthly'
+        coords = {
+            key: xr.DataArray([value], name=key, dims=key).astype(object)
+            for key, value in kw.items() if key != 'verbose'
+        }
+        sigma = 0.5 * (sigma2 - sigma1)
+        spread = 0.5 * (spread2 - spread1)
+        feedback = xr.Dataset(coords=coords)
+        feedback = feedback.astype(object)  # everything object
+        feedback[f'{name}_lam'] = lam.expand_dims(tuple(coords))
+        feedback[f'{name}_dof'] = dof.expand_dims(tuple(coords))
+        feedback[f'{name}_sigma'] = sigma.expand_dims(tuple(coords))
+        feedback[f'{name}_spread'] = spread.expand_dims(tuple(coords))
+        feedbacks.append(feedback)
+    feedbacks = xr.combine_by_coords(feedbacks)
+
+    # Save feedback data
+    # TODO: Copy below style of specifying either output folder or file to plotting.py
+    # Version: ('gis|had', 'monthly|annual', 'region', year1, year2)
+    # Facets: ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')
+    print()
+    start = dataset.time[0].dt.year.item()
+    stop = dataset.time[-1].dt.year.item()
+    head = 'feedbacks_Amon_CERES_historical_r1i1p1f1'
+    tail = f'{start:04d}-{stop:04d}-global.nc'
+    base = Path('~/data/ceres-feedbacks').expanduser()
+    file = '_'.join((head, tail))
+    if isinstance(output, Path) or '/' in (output or ''):
+        base = Path(output).expanduser()
+    elif output is not None:
+        file = output
+    if not base.is_dir():
+        os.mkdir(base)
+    if not base.is_dir():
+        raise ValueError(f'Invalid output location {base}.')
+    print(f'Saving file: {file}')
+    ic(feedbacks)
     feedbacks.to_netcdf(base / file)
     return feedbacks

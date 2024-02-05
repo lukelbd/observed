@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Open datasets containing multiple observed variables.
+Load and combine multiple observations.
 """
 from pathlib import Path
 
@@ -71,6 +71,7 @@ def load_dataset(
         message = ', '.join(f'{src} {size}' for src, size in sizes.items())
         raise RuntimeError(f'Incompatible data dimensions: {message}')
     dataset = xr.merge(datasets.values())
+    dataset = dataset.climo.add_cell_measures()
     return dataset
 
 

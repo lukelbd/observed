@@ -111,7 +111,7 @@ def to_monthly(data):
     return result
 
 
-def get_growth(data):
+def get_growth(data, delta=False):
     """
     Translate annual or monthly concentration to growth rates.
 
@@ -119,6 +119,8 @@ def get_growth(data):
     ----------
     data : pandas.DataFrame
         The input concentrations.
+    delta : bool, optional
+        Whether to return growth differences relative to preceding year.
 
     Returns
     -------
@@ -155,6 +157,8 @@ def get_growth(data):
             growth1 = (days1 * series1 + days2 * series2) / (days1 + days2)
             growth0 = (days0 * series0 + days1 * series1) / (days0 + days1)
             result = (growth1 - growth0) / days1
+        if delta:  # change in growth over following year
+            result = result - result.shift(12)
         results[column] = result
     result = pd.DataFrame(results)
     result = ureg.Quantity(result, units)
@@ -219,7 +223,7 @@ def detrend_time(data, base=None):
         days = data.index.days_in_month.values
         days = np.append(0, np.cumsum(days))
         days = 0.5 * (days[1:] + days[:-1])  # central month
-        *_, trend, _, _ = var.linefit(days, data.values, axis=0, adjust=False)
+        *_, trend, _, _ = var.linefit(days, data.values, axis=0, correct=False)
         if isinstance(data, pd.Series):
             trend = pd.Series(trend, index=data.index, name=data.name)
         elif isinstance(data, pd.DataFrame):

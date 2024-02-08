@@ -5,11 +5,14 @@ Processing utilities for xarray data arrays.
 # TODO: Merge with 'tables.py' and support arbitrary input types. Should leverage
 # public facing abstract-array climopy wrappers. Note that all functions assume
 # dequantified xarrays with units attributes instead of quantified arrays.
+import math
 import warnings
 from datetime import datetime
 from icecream import ic  # noqa: F401
 
-import numpy as np  # noqa: F401
+import cftime
+import numpy as np
+import pandas as pd
 import xarray as xr
 from climopy import var, ureg, vreg  # noqa: F401
 
@@ -17,14 +20,64 @@ from climopy import var, ureg, vreg  # noqa: F401
 __all__ = [
     'annual_average',
     'annual_filter',
-    'detrend_series',
-    'regress_series',
-    'standardize_grid',
+    'detrend_dims',
+    'regress_dims',
+    'standardize_dims',
 ]
 
 # Message cache
 # NOTE: Used to prevent duplicate trend messages
 VERBOSE_MESSAGES = set()
+
+
+def to_decimal(data, dim=None):
+    """
+    Convert datetime index to decimal year.
+
+    Parameters
+    ----------
+    data : xarray.DataArray
+        The input data with datetime coordinate.
+    dim : str, default: 'time'
+        The datetime coordinate name.
+
+    Returns
+    -------
+    result : xarray.DataArray
+        The array with decimal year coordinate.
+    """
+    # TODO: Consider moving this to 'climopy' or 'coupled' (more relevant for models).
+    # NOTE: Xarray cftime has 'dayofyear' 'days_in_month' and 'is_leap_year' but no
+    # 'days_in_month' so derive from calendar: https://unidata.github.io/cftime/api.html
+    dim = dim or 'time'
+    if dim not in data.dims:
+        raise ValueError(f'Time dimension {dim!r} is not in {data.dims}.')
+    index = data.indexes[dim]
+    if not isinstance(index, (xr.CFTimeIndex, pd.DatetimeIndex)):
+        return data  # assume already decimal year
+    date = data.coords[dim]
+    calendar = date.dt.calendar
+    if isinstance(index, pd.DatetimeIndex):
+        days = 365 + date.dt.is_leap_year.astype(int)
+    elif calendar in ('360_day',):
+        days = xr.full_like(date, 360, dtype=int)
+    elif calendar in ('365_day', 'noleap'):
+        days = xr.full_like(date, 365, dtype=int)
+    elif calendar in ('366_day', 'all_leap'):
+        days = xr.full_like(date, 366, dtype=int)
+    else:  # no .dt.is_leap_year method
+        days = [cftime.is_leap_year(t, calendar) for t in date.dt.year.values]
+        days = np.array(days, dtype=int)
+        days = 365 + xr.DataArray(days, dims=dim)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        year = date.dt.year + date.dt.dayofyear / days
+    year.name = date.name
+    year.attrs.update(date.attrs)
+    year.attrs['units'] = 'year'
+    data = year if data.name == date.name else data
+    data = data.assign_coords({dim: year})
+    return data
 
 
 def annual_average(data, **kwargs):
@@ -67,6 +120,7 @@ def annual_average(data, **kwargs):
             denom = (xr.ones_like(data) * days).resample(time=f'AS-{month}')
             result = numer.sum(dim='time', skipna=False) / denom.sum(dim='time')
     result.name = name
+    result.time.attrs.update(data.time.attrs)  # critical for add_cell_measures()
     return result
 
 
@@ -124,7 +178,7 @@ def annual_filter(data, years=None, month=None, anomaly=False):
     return result
 
 
-def detrend_series(data, verbose=False, **kwargs):
+def detrend_dims(data, dim=None, verbose=False, **kwargs):
     """
     Return detrended input data.
 
@@ -132,10 +186,12 @@ def detrend_series(data, verbose=False, **kwargs):
     ----------
     data : xarray.DataArray
         The input data.
+    dim : str, default: 'time'
+        The detrending dimension.
     verbose : bool, optional
         Whether to print info on the detrend slope.
     **kwargs
-        Passed to `_regress_series`.
+        Passed to `regress_dims`.
 
     Returns
     -------
@@ -143,42 +199,37 @@ def detrend_series(data, verbose=False, **kwargs):
         The detrended data.
     """
     # Get trends
+    # WARNING: Critical to have regress_dims auto-drop 'x', 'y', 'fit',
+    # 'fit_lower', and 'fit_upper' coordinates left over from detrending.
     # NOTE: For regional data this will remove regional trends. Then when taking
     # global average will reproduce removal of global average trend.
-    kwargs.setdefault('correct', True)
-    result = regress_series(data, data.time, **kwargs)
-    beta, _, _, dof, fit, fit_lower, fit_upper = result
+    dim = dim or 'time'  # intentional error
+    base = getattr(data, dim)  # possibly integer
+    kwargs = {**kwargs, 'nofit': False}  # always override
+    result = regress_dims(base, data, **kwargs)
+    beta, _, _, fit, fit_lower, fit_upper, rsq, dof = result
     beta = beta.squeeze(drop=True)
     name = data.name
     if verbose:  # print message
         if 'lon' in beta.sizes and 'lat' in beta.sizes:
             beta = beta.climo.add_cell_measures()
             beta = beta.climo.average('area')
-        if isinstance(dof, xr.DataArray) and 'lon' in dof.sizes and 'lat' in dof.sizes:
-            dof.attrs.update(units='')
+        if 'lon' in dof.sizes and 'lat' in dof.sizes:
             dof = dof.climo.add_cell_measures()
-            dof = dof.climo.average('area')
-            dof = np.round(dof).astype(np.int64).item()
+            dof = dof.climo.average('area').item()  # 'units' can now be missing
         trend = f'{10 * beta.item(): >5.2f}'
         units = data.attrs.get('units', None)
         header = name or 'unknown'
-        message = f'{header: >8s} trend: {trend} {units} / decade (dof {dof})'
+        message = f'{header: >8s} trend: {trend} {units} / decade (dof {dof:.0f})'
         if message not in VERBOSE_MESSAGES:
             print(message)
         VERBOSE_MESSAGES.add(message)
-
-    # Update averages
-    # WARNING: Critical to have _regress_series auto-drop 'x', 'y', 'fit',
-    # 'fit_lower', and 'fit_upper' coordinates left over from detrending.
-    with warnings.catch_warnings():  # datetime64 emits annoying error
-        warnings.simplefilter('ignore')
-        wgts = fit.time.dt.days_in_month
-        wgts = wgts / wgts.sum('time')
-    fmean = (wgts * fit).sum('time', skipna=False)
-    result = data - fit + fmean
-    fit = fit.drop_vars(('x', 'y'))
-    fit_lower = fit_lower.drop_vars(('x', 'y'))
-    fit_upper = fit_upper.drop_vars(('x', 'y'))
+    drop = ('x', 'y', 'base')
+    base = fit.base.drop_vars('base')
+    fit = fit.drop_vars(drop)
+    fit_lower = fit_lower.drop_vars(drop)
+    fit_upper = fit_upper.drop_vars(drop)
+    result = data - fit + base  # WARNING: must come after drop
     result.name = name
     result.attrs.update(data.attrs)
     result.coords['fit'] = fit
@@ -187,83 +238,134 @@ def detrend_series(data, verbose=False, **kwargs):
     return result
 
 
-def regress_series(
-    numer, denom, coords=None, noweight=False, nofit=False, correct=True, pctile=True,
+def regress_dims(
+    denom, numer, dim=None, stat=None, coords=None, weights=None,
+    correct=None, pctile=True, noweight=False, nobnds=False, nofit=None,
 ):
     """
     Return regression parameters.
 
     Parameters
     ----------
-    numer, denom : xarray.DataArray
-        The numerator and denominator.
+    denom, numer : xarray.DataArray
+        The regression denominator and numerator.
+    dim : str, default: 'time'
+        The regression dimension(s). Parsed by climopy.
+    stat : {'proj', 'covar', 'corr', 'rsq'}, optional
+        Whether to return the input statistic instead of slope.
     coords : array-like, optional
         The coordinates used for the fit. Default is `denom`.
-    noweight : bool, optional
-        Whether to skip weighting by days-per-month.
-    nofit : bool, optional
-        Whether to skip calculating fit bounds.
+    weights : array-like, optional
+        The manual weights used for the fit. Default is nothing.
     correct : bool or str, optional
         Whether to correct the standard error for reduced degrees of freedom due
         to serial correlation. If sequence then ``correct`` coordinate is added.
     pctile : bool or float, optional
         Whether to return percentiles bounds or standard error deviations. If float
         this is the percentile range. If sequence then ``pctile`` coordinate is added.
+    noweight : bool, optional
+        Whether to skip weighting by cell measures (e.g. duration). If ``True``
+        user-input `weights` can still be used.
+    nobnds : bool, optional
+        Whether to skip calculating statistic bounds. If ``True`` only the
+        first argument is returned.
+    nofit : bool, optional
+        Whether to skip calculating fit bounds. If ``True`` only four arguments
+        are returned. Must be ``False`` if `corr` or `covar` is ``True``.
 
     Returns
     -------
-    slope, slope_lower, slope_upper : xarray.dataArray
-        The calculated slope and its uncertainty.
-    dof : xarray.DataArray
-        The calculated degrees of freedom.
-    fit, fit_lower, fit_upper : xarray.DataArray
-        The calculated fit and its uncertainty.
+    result : xarray.DataArray
+        The calculated statistic.
+    result_lower, result_upper : xarray.dataArray, optional
+        The statistic uncertainty bounds. Skipped if `nobnds` is ``True``.
+    fit, fit_lower, fit_upper : xarray.DataArray, optional
+        The regression fit and uncertainty bounds. Skipped if `nofit` is ``True``.
+    rsq, dof : xarray.DataArray, optional
+        The degrees of freedom and variance explained. Skipped if `nobnds` and `nofit`.
     """
     # Get regression estimates
-    # NOTE: For details see coupled.process._components_slope (uses climo.linefit) and
-    # cmip_data.feedbacks._regress_monthly. Combines 'linefit' behavior returning extra
-    # uncertainty parameters and '_regress_monthly' weighting behavior. Also note it
-    # is critical to auto-drop 'x', 'y', 'fit', 'fit_lower', and 'fit_upper' coords
+    # NOTE: Critical to auto-drop 'x', 'y', 'fit', 'fit_lower', and 'fit_upper' coords
     # left over from detrending or else get weird hard-to-debug errors (see below).
+    # TODO: Also use this for e.g. weighted standard deviations, variance, and other
+    # statistics. Should add to climopy and incorporate with covariance driver.
     # TODO: Move this into climopy linefit(). Currently 'institute-factor' does not
     # support percentile bounds, optionally disabling autocorrelation adjustment, or
     # optionally using other series for autocorrelation adjustment, and 'monde-updates'
     # does not support weighted regressions or weighted uncertainty bounds and does
     # not auto-detrend the series used for adjustment.
-    if denom.name == 'time':  # assume identical spacing
-        denom = xr.ones_like(denom, numer.dtype)
-        with warnings.catch_warnings():  # datetime64 emits annoying warning
-            warnings.simplefilter('ignore')
-            months = denom.time.dt.month
-        denom = denom.cumsum('time') / len(np.unique(months))
-    numer = numer.climo.dequantify()  # ensure units attribute
+    kw_dims = dict(include_scalar=False, include_pseudo=False)
+    nofit = bool(stat) if nofit is None else nofit
+    nofit = nofit or nobnds  # always siable if nobnds=True
     denom = denom.climo.dequantify()  # ensure units attribute
-    numer = numer.drop_vars(numer.coords.keys() - numer.sizes.keys())
+    numer = numer.climo.dequantify()  # ensure units attribute
+    dims = denom.climo._parse_dims(dim or 'time', **kw_dims)  # must be in denominator!
+    dim = dims[0] if len(dims) == 1 else None  # single coordinate
+    time = denom.coords['time'] if dim == 'time' and denom.name == 'time' else None
+    if stat and not nofit:
+        raise ValueError(f'Incompatible arguments {stat=} {nofit=}.')
+    if noweight:  # input weights only not infer weights
+        wgts = xr.ones_like(denom) if weights is None else weights
+    else:  # infer automatically (_parse_weights raises error if missing)
+        numer = numer.climo.add_cell_measures()
+        dims, *parts = numer.climo._parse_weights(dims, weight=weights, **kw_dims)
+        wgts = math.prod(wgt.climo.dequantify() for wgts in parts for wgt in wgts)
+    if time is not None:  # WARNING: must be called after add_cell_measures()
+        denom = to_decimal(denom).astype(numer.dtype)
+        numer = to_decimal(numer)
+        wgts = to_decimal(wgts)
     denom = denom.drop_vars(denom.coords.keys() - denom.sizes.keys())
-    numer, denom = xr.broadcast(*xr.align(numer, denom))  # align time, broadcast other
+    numer = numer.drop_vars(numer.coords.keys() - numer.sizes.keys())
+    wgts = wgts.drop_vars(wgts.coords.keys() - wgts.sizes.keys())
+    denom, numer, wgts = xr.align(denom, numer, wgts)  # align 'dims' coordinates
+    denom, numer, wgts = xr.broadcast(denom, numer, wgts)  # broadcast other coordinates
     nulls = numer.isnull() | denom.isnull()
-    numer, denom = numer.where(~nulls), denom.where(~nulls)
-    with warnings.catch_warnings():  # datetime64 emits annoying warning
-        warnings.simplefilter('ignore')
-        if noweight:
-            wgts = xr.ones_like(denom)
-        else:  # no-op if already annual averaged
-            wgts = denom.time.dt.days_in_month  # after 'annual_filter'
-    wgts = wgts / wgts.sum('time')  # note now (w * d).sum() is effectively d.sum() / n
-    navg = (wgts * numer).sum('time', skipna=True)
-    davg = (wgts * denom).sum('time', skipna=True)
+    numer, denom, wgts = numer.where(~nulls), denom.where(~nulls), wgts.where(~nulls)
+    wgts = wgts / wgts.sum(dims)  # note now (w * d).sum() is effectively d.sum() / n
+
+    # Calculate statistic
+    # NOTE: This defines projection 'standard error' as regression error formula times
+    # sx and covariance 'standard error' as correlation error formula times sx * sy.
+    # NOTE: For simplicity this gives the *biased* weighted variance estimator (analogue
+    # for unweighted data is SS / N) instead of the complex *unbiased* weighted variance
+    # estimator (analogue for unweighted data SS / N - 1). See full formula here:
+    # https://en.wikipedia.org/wiki/Weighted_arithmetic_mean#Reliability_weights
+    # NOTE: Calculation of residual leverages facts that offset = ymean - slope * xmean
+    # and slope stderr = sqrt(resid ** 2 / xanom ** 2 / n - 2) where resid =
+    # y - ((ymean - slope * xmean) + slope * x) = (y - ymean) - slope * (x - xmean)
+    # https://en.wikipedia.org/wiki/Simple_linear_regression#Normality_assumption
+    davg = (wgts * denom).sum(dims, skipna=True)
+    navg = (wgts * numer).sum(dims, skipna=True)
     covar = wgts * (denom - davg) * (numer - navg)
-    covar = covar.sum('time', skipna=True)
+    covar = covar.sum(dims, skipna=True)
     dvar = wgts * (denom - davg) ** 2
-    dvar = dvar.sum('time', skipna=True)
+    dvar = dvar.sum(dims, skipna=True)
+    rsq = None  # skip calculating by default
     slope = covar / dvar
     offset = navg - slope * davg
-    slope.attrs.update(units=f'{numer.units} / year')
-    offset.attrs.update(units=numer.units)
+    if not nobnds or stat == 'corr':
+        nvar = wgts * (numer - navg) ** 2
+        nvar = nvar.sum(dims, skipna=True)
+        rsq = covar ** 2 / (dvar * nvar)
+    if not stat or stat == 'slope':
+        result = slope
+        units = f'{numer.units} / {denom.units}'
+    elif stat == 'covar':
+        result = covar
+        units = f'{numer.units} {denom.units}'
+    elif stat == 'proj':
+        result = covar / np.sqrt(dvar)
+        units = numer.units
+    elif stat == 'corr':
+        result = covar / (np.sqrt(dvar) * np.sqrt(nvar))
+        units = ''
+    else:
+        raise ValueError(f'Unknown input statistic {stat!r}.')
+    result.attrs.update(units=units)
 
     # Get degrees of freedom adjustment
-    # NOTE: This significantly speeds up repeated calculations where we are trying
-    # to get every possible estimate of feedback uncertainty.
+    # NOTE: This significantly speeds up repeated calculations where we want
+    # to retrieve every possible estimate of feedback uncertainty.
     # NOTE: See linefit() and wiki page for details. Previously thought we only needed
     # to apply reduced dof to t-distribution not standard error (idea was that residual
     # sum in slope standard error formula was incorrectly scaled) but now see that
@@ -272,11 +374,13 @@ def regress_series(
     # Similar to uncertainty in population mean estimator versus just raw uncertainty.
     # See: https://en.wikipedia.org/wiki/Simple_linear_regression#Normality_assumption
     dofs = {}
-    args = np.atleast_1d(correct).tolist()
-    for correct in args:
+    for correct in np.atleast_1d(correct):
+        correct = time is not None if correct is None else correct
         correct = 'r' if correct is True else correct or ''
         if not correct:
             seq, corr = None, xr.zeros_like(slope)
+        elif dim is None:
+            raise ValueError(f'Too many dimensions {dims!r} for {correct=}.')
         elif correct == 'x':
             seq, savg = denom, davg
         elif correct == 'y':
@@ -284,74 +388,99 @@ def regress_series(
         elif correct == 'r':  # see climopy
             with xr.set_options(keep_attrs=True):
                 seq = numer - (offset + denom * slope)  # correlate in *time*
-                savg = (wgts * seq).sum('time', skipna=True)
+                savg = (wgts * seq).sum(dims, skipna=True)
         else:
             raise ValueError(f"Invalid {correct=}. Must be 'x' or 'y'.")
+        if seq is not None and time is not None:
+            seq = seq.assign_coords({'time': time})
         if seq is not None:
-            seq = detrend_series(seq, noweight=noweight, correct=False)
-            seq1, seq2 = seq.isel(time=slice(1, None)), seq.isel(time=slice(None, -1))
-            seq2 = seq2.assign_coords(time=seq1.time.values)  # avoid alignment!
-            sigma = ((seq - savg) ** 2).mean('time', skipna=True)
-            corr = ((seq1 - savg) * (seq2 - savg)).mean('time', skipna=True) / sigma
+            seq = detrend_dims(seq, noweight=noweight, correct=False)
+            seq1 = seq.isel({dim: slice(1, None)})
+            assign = {dim: seq1.coords[dim].values}
+            seq2 = seq.isel({dim: slice(None, -1)}).assign_coords(assign)
+            sigma = ((seq - savg) ** 2).mean(dim, skipna=True)
+            corr = ((seq1 - savg) * (seq2 - savg)).mean(dim, skipna=True) / sigma
         corr = np.clip(corr, 0, None)
         scale = ((1 - corr) / (1 + corr))  # effective samples
-        dof = numer.time.size * scale - 2  # see above
+        dof = math.prod(numer.sizes[key] for key in dims) * scale - 2  # see above
         dof.attrs['units'] = ''
         dofs[correct] = dof
     if len(dofs) == 1:
         _, dof = dofs.popitem()
     else:
-        dof = xr.concat(tuple(dofs.values()), xr.DataArray(list(dofs), dims='correct'))
+        dof = xr.concat(list(dofs.values()), xr.DataArray(list(dofs), dims='correct'))
 
     # Get standard error and fit terms. Sort if data is one-dimensional
-    # NOTE: See process.py _components_slope() for details. Here do not need 'pctile'
-    # dimension on either slope uncertainty range or best fit uncertainty range.
     # NOTE: Arrived at replacement for 1 / n term from wikipedia formula empirically
     # by noting that average x variance ratio term was exactly equivalent to 1 / n.
+    # NOTE: This uses a special t-statistic to infer correlation uncertainty bounds.
+    # See: https://en.wikipedia.org/wiki/Pearson_correlation_coefficient#Standard_error
     # WARNING: Critical that 'danoms' and 'dvars' both use same day-per-month weights
     # so that they cancel below. Wikipedia formula just does raw sums.
-    axis = denom.dims.index('time')
-    isel = {'time': np.argsort(denom.values, axis=axis)} if denom.ndim == 1 else {}
-    nsort, dsort, wsort = numer.isel(isel), denom.isel(isel), wgts.isel(isel)
-    fit = (offset + dsort * slope).transpose('time', ...)
-    fit.attrs.update(units=numer.units)
-    resid = (nsort - fit) ** 2
-    resid = (wsort * resid).sum('time', skipna=True)
-    danom = wsort * (dsort - davg) ** 2 / dvar
-    danom = danom + danom.mean('time', skipna=True)  # tested
-    ssigma = np.sqrt(resid / dvar / dof)
-    fsigma = np.sqrt(danom * resid)  # approximate
-    bounds = []  # store individual bounds
-    pairs = ((slope, ssigma),) if nofit else ((slope, ssigma), (fit, fsigma))
-    for base, sigma in pairs:
-        deg, sigma = xr.broadcast(dof, sigma)  # prepend 'correct'
-        deltas = var._dist_bounds(sigma, pctile, dof=deg, symmetric=True)
-        for delta in deltas:
-            dims = sigma.dims if sigma.ndim == delta.ndim else ('pctile', *sigma.dims)
-            bound = base + xr.DataArray(delta, dims=dims)
-            bounds.append(bound)
-    bnds = bounds[:2]
-    fits = []
-    values = () if nofit else (fit, *bounds[2:])
-    for fit in values:
-        kw_interp = {'method': 'linear', 'kwargs': {'fill_value': 'extrapolate'}}
-        if coords is not None:
-            if not isinstance(coords, xr.DataArray):
-                coords = xr.DataArray(coords, dims='time')
-            fit = fit.drop_vars('time').rename(time='denom')
-            fit = fit.assign_coords(denom=dsort.values)
-            fit = fit.interp(denom=coords, **kw_interp).drop_vars('denom')
-            fit.coords.update({'x': coords, 'y': xr.full_like(coords, np.nan)})
-        else:  # default behavior
-            fit.coords.update({'x': dsort, 'y': nsort})
-        fits.append(fit)
     # ic((slope_upper - slope_lower) * denom.mean(), (fit_upper - fit_lower).mean())
     # ic(numer.name, denom.name, slope, sigma, slope_lower, slope_upper, dof)
     # ic(fit.mean(), (fit_upper - fit_lower).mean(), fit_upper.mean())
-    return slope, *bnds, dof, *fits
+    isel = {}
+    bnds, ibnds = [], []  # store individual bounds
+    dsort, nsort, wsort = denom, numer, wgts
+    if not nofit and dim is not None:  # sort to make plotting easier
+        axis = denom.dims.index(dim)
+        isel = {dim: np.argsort(denom.values, axis=axis)}
+        dsort, nsort, wsort = denom.isel(isel), numer.isel(isel), wgts.isel(isel)
+    if not nobnds and stat in ('corr', 'covar'):  # see wikipedia correlation page
+        base = np.sqrt(dvar) * np.sqrt(nvar)
+        corr = covar / base
+        sigma = np.sqrt((1 - corr ** 2) / dof)
+        ibnds.append((corr / sigma, sigma))
+    elif not nobnds:  # see wikipedia simple linear regression page
+        fit = (offset + dsort * slope).transpose(*dims, ...)
+        resid = (wsort * (nsort - fit) ** 2).sum(dims, skipna=True)
+        sigma = np.sqrt(resid / dvar / dof)
+        ibnds.append((slope, sigma))
+    if not nofit:  # only allowed if not corr and not covar
+        danom = wsort * (dsort - davg) ** 2 / dvar
+        danom = danom + danom.mean(dims, skipna=True)  # valid after testing
+        sigma = np.sqrt(danom * resid)  # approximate
+        ibnds.append((fit, sigma))
+    for base, sigma in ibnds:
+        idof, isigma = xr.broadcast(dof, sigma)  # prepend 'correct'
+        deltas = var._dist_bounds(isigma, pctile, dof=idof, symmetric=True)
+        for delta in deltas:
+            dims = isigma.dims if isigma.ndim == delta.ndim else ('pctile', *isigma.dims)  # noqa: E501
+            bound = base + xr.DataArray(delta, dims=dims)
+            if stat in ('corr', 'covar'):
+                bound = bound / np.sqrt(idof + bound ** 2)  # see wiki page
+            if stat == 'covar':
+                bound = bound * np.sqrt(nvar) * np.sqrt(dvar)
+            if stat == 'proj':
+                bound = bound * np.sqrt(dvar)
+            bound.attrs.update(result.attrs)
+            bnds.append(bound)
+    kw_interp = {'method': 'linear', 'kwargs': {'fill_value': 'extrapolate'}}
+    fits, ifits = [], () if nofit else (fit, *bnds[2:])
+    bnds = () if nobnds else (*bnds[:2],)
+    for fit in ifits:
+        if coords is None:
+            assign = {} if time is None else {'time': time.isel(isel)}
+            fit = fit.assign_coords(assign)
+            xdata = dsort.assign_coords(assign)
+            ydata = nsort.assign_coords(assign)
+        elif dim is not None:  # interpolate to input coordinates
+            fit = fit.drop_vars(dim).rename({dim: denom.name})
+            fit = fit.assign_coords({denom.name: dsort.values})
+            fit = fit.interp({denom.name: coords}, **kw_interp)
+            fit = fit.drop_vars(denom.name)
+            xdata = xr.DataArray(coords, dims=dim)  # ok if coords is already DataArray
+            ydata = xr.full_like(coords, np.nan)  # no corresponding 'actual data'
+        else:
+            raise ValueError(f'Too many dimensions {dims!r} for input fit coordinates.')
+        fit.attrs.update(units=numer.units)
+        fit.coords.update({'x': xdata, 'y': ydata, 'base': navg})
+        fits.append(fit)
+    return result if nobnds and nofit else (result, *bnds, *fits, rsq, dof)
 
 
-def standardize_grid(data):
+def standardize_dims(data):  # noqa: U100
     """
     Standardize data onto the same horizontal grid.
 
@@ -373,4 +502,3 @@ def standardize_grid(data):
     #     cdo remapcon,r72x36 "$file" "${file%.nc}_standardized.nc"
     #   done
     # done
-    data

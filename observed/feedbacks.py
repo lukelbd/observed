@@ -14,7 +14,7 @@ import xarray as xr
 from climopy import var, ureg, vreg  # noqa: F401
 
 from .datasets import load_dataset
-from .arrays import annual_average, annual_filter, detrend_series, regress_series
+from .arrays import annual_average, annual_filter, detrend_dims, regress_dims
 
 __all__ = ['calc_feedback', 'process_spatial', 'process_scalar']
 
@@ -175,7 +175,7 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
     **kwargs
         Passed to `_parse_names` or `calc_feedback`.
     """
-    names = kwargs.get('name', None)
+    names = kwargs.pop('name', None)
     skip_keys = (skip_keys,) if isinstance(skip_keys, str) else tuple(skip_keys or ())
     skip_values = (skip_values,) if isinstance(skip_values, str) else tuple(skip_values or ())  # noqa: E501
     if names is None:
@@ -197,8 +197,10 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
     }
     params = {key: kwargs.pop(key, value) for key, value in defaults.items()}
     params = {key: value if isinstance(value, (list, tuple)) else (value,) for key, value in params.items()}  # noqa: E501
-    correct = params.pop('correct', True)  # regress_series() creates coordinate
+    correct = params.pop('correct', True)  # regress_dims() creates coordinate
+    source = params.pop('source', ('gis',))
     kwargs.update({} if 'correct' in skip_keys else {'correct': correct})
+    kwargs.update({} if names is not None else {'source': source})
     return inputs, params, kwargs
 
 
@@ -230,7 +232,7 @@ def calc_feedback(
     **kw_annual
         Passed to `annual_average` or `annual_filter`.
     **kw_regress
-        Passed to the `regress_series`.
+        Passed to the `regress_dims`.
 
     Returns
     -------
@@ -246,13 +248,13 @@ def calc_feedback(
     # flux components e.g. 'rfnt' will be auto-derived from e.g. 'rsdt' 'rsut' 'rlut'.
     from coupled.process import get_result
     from coupled.specs import _pop_kwargs
-    nofit = kwargs.get('nofit', False)
     kw_annual = _pop_kwargs(kwargs, annual_filter)
     kw_regress = kwargs.copy()
     kw_detrend = {**kwargs, 'correct': False}
     kw_input = dict(source=source, wav=wav, sky=sky, cld=cld, sfc=sfc)
     kw_input = {key: value for key, value in kw_input.items() if value is not None}
     kw_parts = kw_input.copy()
+    nofit = kw_detrend.pop('nofit', False)  # remove from 'detrend'
     for key, value in (('wav', 'f'), ('source', 'gis')):
         kw_parts.setdefault(key, value)
     if not np.isscalar(years):
@@ -282,13 +284,13 @@ def calc_feedback(
     # WARNING: If calculating e.g. feedbacks starting in July for 150-year control
     # simualtion annual_filter() returns 149 full years, so when selecting sub-periods
     # allow the final period to be up to 12 months shorter due to truncation.
-    # NOTE: Previously embedded annual stuff inside regress_series so **kwargs would
+    # NOTE: Previously embedded annual stuff inside regress_dims so **kwargs would
     # do it twice but with bootstrapping need to ensure correct starting months are
     # selected or e.g. might select 19-year sample instead of 20-year sample.
-    mask = ~flux.isnull() & ~temp.isnull()
-    flux, temp = flux[mask], temp[mask]
+    mask = ~temp.isnull() & ~flux.isnull()
+    temp, flux = temp[mask], flux[mask]
     func = annual_average if annual else annual_filter
-    flux, temp = func(flux, **kw_annual), func(temp, **kw_annual)
+    temp, flux = func(temp, **kw_annual), func(flux, **kw_annual)
     coords = None  # fit coordinates
     times = [0]  # regression index
     scale = 1 if annual else 12
@@ -304,20 +306,20 @@ def calc_feedback(
         times = np.arange(0, flux.size - size + scale, step)  # NOTE: see above
     for time in times:
         datas = []
-        for idx, data in enumerate((flux, temp)):
+        for idx, data in enumerate((temp, flux)):
             data = data[time:time + size]
             if idx in idxs:  # note detrend
                 verb = True if verbose and time == times[0] else False
-                data = detrend_series(data, verbose=verb, **kw_detrend)
+                data = detrend_dims(data, verbose=verb, **kw_detrend)
             datas.append(data)
-        result = regress_series(*datas, coords=coords, **kw_regress)
-        lam, lam_lower, lam_upper, dof, *_ = result
+        result = regress_dims(*datas, coords=coords, **kw_regress)
+        lam, lam_lower, lam_upper, *_, dof = result
         lams.append(lam)
         lams_lower.append(lam_lower)
         lams_upper.append(lam_upper)
         dofs.append(dof)
         if not nofit:
-            *_, fit, fit_lower, fit_upper = result
+            _, _, _, fit, fit_lower, fit_upper, *_ = result
             fits.append(fit)
             fits_lower.append(fit_lower)
             fits_upper.append(fit_upper)
@@ -396,7 +398,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         kw_fluxes = dict(style=style, components=('', 'cs'), boundaries=('t',))
         dataset = annual_filter(dataset, **kw_filter)
         result = dataset.rename({f'ts_{source[:3]}': 'ts'})
-        result['ts'] = detrend_series(result.ts)  # detrend temperature (see above)
+        result['ts'] = detrend_dims(result.ts)  # detrend temperature (see above)
         for values in itertools.product(*parts.values()):
             items = dict(zip(parts, values))
             cld, wav, sky = items['cld'], items['wav'], items['sky']
@@ -457,22 +459,27 @@ def process_scalar(dataset=None, output=None, **kwargs):
     inputs, params, kwargs = _parse_kwargs(**kwargs)
     translate = kwargs.pop('translate', None)
     results = {}
-    print('Calculating global climate feedbacks.')
+    if output is not False:
+        print('Calculating global climate feedbacks.')
     for values in itertools.product(*params.values()):
         kwarg = dict(zip(params, values))
         coord = _parse_coords(dataset.time, translate, **kwarg)
         kwarg.update(kwargs)
+        inputs['source'] = kwarg.pop('source', (None,))
         levels = (*coord, 'correct')  # see below
-        print(' '.join(f'{key} {value!r}' for key, value in coord.items()))
         result = {}
+        if output is not False:
+            print(' '.join(f'{key} {value!r}' for key, value in coord.items()))
         for values in itertools.product(*inputs.values()):
             kw = dict(nofit=True, pctile=False, **kwarg)
             opts = dict(zip(inputs, values))
-            source = kwarg.get('source', None) or ''
-            if kwarg.get('source', None):
+            source = opts.pop('source', None) or ''
+            if not source:  # _parse_kwargs only keeps if 'names' not passed
                 name, cld, wav, sky = values[0], '', '', ''
             else:  # _parse_kwargs handles incompatibilities
                 name, cld, wav, sky = '', *(opts[key] for key in ('cld', 'wav', 'sky'))
+            if sky == 'cld':  # workaround
+                cld, sky = sky, ''
             temp = f'ts_{source}'.strip('_')
             flux = name or f'{cld}_r{wav}nt{sky}'.strip('_')
             lam, sigma1, sigma2, dof, *_ = calc_feedback(dataset, temp, flux, **kw)
@@ -515,7 +522,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     )
     correct = np.atleast_1d(kwargs.get('correct', True))
     correct = xr.DataArray(correct, dims='correct')  # in case scalar
-    result = result if 'correct' in result.dims else result.expand_dims(correct)
+    result = result if 'correct' in result.dims else result.expand_dims('correct')
     result = result.stack(version=['concat', 'correct'])
     result = result.transpose('version', ...)
     version = tuple(results)  # original version values

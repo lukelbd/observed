@@ -16,7 +16,7 @@ __all__ = [
     'to_datetime',
     'to_monthly',
     'get_growth',
-    'fill_time',
+    'restrict_time',
     'detrend_time',
     'reduce_time',
     'select_time',
@@ -135,7 +135,7 @@ def get_growth(data, delta=False):
     # of below growth rates reconstructs ESRL (CO2 from internal months cancel out).
     units = getattr(data, 'units', ureg.ppm)
     data = getattr(data, 'magnitude', data)
-    data = to_monthly(fill_time(data))
+    data = to_monthly(restrict_time(data))
     if units.is_compatible_with('GtC / yr'):
         return ureg.Quantity(data, units).to('GtC / yr')
     if not units.is_compatible_with('ppm'):
@@ -167,37 +167,6 @@ def get_growth(data, delta=False):
     return result
 
 
-def fill_time(data):
-    """
-    Resample data to within non-null years then interpolate remaining nulls.
-
-    Parameters
-    ----------
-    data : pandas.DataFrame
-        The input data.
-
-    Returns
-    -------
-    result : pandas.DataFrame
-        The restricted output data.
-    """
-    # NOTE: This is critical for e.g. climopy 'linefit' methods that rely on
-    # no missing values. In future should add masked array features to climopy.
-    units = getattr(data, 'units', None)
-    data = getattr(data, 'magnitude', data)
-    if not isinstance(data, (pd.Series, pd.DataFrame)):
-        raise TypeError(f'Invalid input type {type(data)}.')
-    mask = data.isnull()
-    mask = mask if mask.ndim == 1 else mask.any(axis=1)
-    idxs, = np.where(~mask)
-    idx1 = min(idxs, default=0)
-    idx2 = max(idxs, default=data.index.size - 1)
-    result = data.iloc[idx1:idx2 + 1]
-    result = result.interpolate(method='linear', axis=0)
-    result = result if units is None else ureg.Quantity(result, units)
-    return result
-
-
 def detrend_time(data, base=None):
     """
     Remove trend from the input time series.
@@ -218,7 +187,7 @@ def detrend_time(data, base=None):
     """
     units = getattr(data, 'units', None)
     data = getattr(data, 'magnitude', data)
-    data = fill_time(data)  # fill nulls before interpolation
+    data = restrict_time(data)  # fill nulls before interpolation
     if base is None:
         days = data.index.days_in_month.values
         days = np.append(0, np.cumsum(days))
@@ -240,7 +209,7 @@ def detrend_time(data, base=None):
         else:  # e.g. forgot to select base column
             raise ValueError(f'Incompatible shapes {base.shape} and {data.shape}.')
         base = ureg.Quantity(base, units)  # translate units if quantity
-        base = fill_time(base.magnitude)
+        base = restrict_time(base.magnitude)
         locs = data.index.intersection(base.index)
         data, base = data.loc[locs], base.loc[locs]
         trend = base * data.values.mean().item() / base.values.mean().item()
@@ -325,6 +294,37 @@ def reduce_time(data, time=None, lag=None):
     return result, label, name
 
 
+def restrict_time(data):
+    """
+    Restrict data to within non-null years then interpolate remaining nulls.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        The input data.
+
+    Returns
+    -------
+    result : pandas.DataFrame
+        The restricted output data.
+    """
+    # NOTE: This is critical for e.g. climopy 'linefit' methods that rely on
+    # no missing values. In future should add masked array features to climopy.
+    units = getattr(data, 'units', None)
+    data = getattr(data, 'magnitude', data)
+    if not isinstance(data, (pd.Series, pd.DataFrame)):
+        raise TypeError(f'Invalid input type {type(data)}.')
+    mask = data.isnull()
+    mask = mask if mask.ndim == 1 else mask.any(axis=1)
+    idxs, = np.where(~mask)
+    idx1 = min(idxs, default=0)
+    idx2 = max(idxs, default=data.index.size - 1)
+    result = data.iloc[idx1:idx2 + 1]
+    result = result.interpolate(method='linear', axis=0)
+    result = result if units is None else ureg.Quantity(result, units)
+    return result
+
+
 def select_time(data, years=None):
     """
     Select input years or date range.
@@ -346,7 +346,7 @@ def select_time(data, years=None):
     index = data.index
     units = getattr(data, 'units', None)
     data = getattr(data, 'magnitude', data)
-    data = fill_time(data)
+    data = restrict_time(data)
     year1 = getattr(index, 'year', index)[-1].item()
     years = (2000, None) if years is None else years
     years = np.atleast_1d(years)

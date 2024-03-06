@@ -544,16 +544,18 @@ def process_scalar(dataset=None, output=None, **kwargs):
     else:  # save result
         base = Path('~/data/global-feedbacks').expanduser()
         file = 'feedbacks_CERES_global.nc'
-        if isinstance(output, Path) or '/' in (output or ''):  # copy to general.py
-            base = Path(output).expanduser()
-        elif output is not None:  # copy to general.py
-            file = output
-        if not base.is_dir():
-            os.mkdir(base)
-        if not base.is_dir():
-            raise ValueError(f'Invalid output location {base}.')
-        if (base / file).is_file():
-            os.remove(base / file)
-        print(f'Saving file: {file}')
-        result.reset_index('version').to_netcdf(base / file)
+        if isinstance(output, str) and '/' not in output:
+            output = base / output
+        elif output:
+            output = Path(output).expanduser()
+        if not output:
+            output = base / file
+        elif not output.suffix:
+            output = output / file
+        if not output.parent.is_dir():
+            os.mkdir(output.parent)
+        if output.is_file():
+            os.remove(output)
+        print(f'Saving file: {output.name}')
+        result.reset_index('version').to_netcdf(output)
     return result

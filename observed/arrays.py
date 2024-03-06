@@ -240,7 +240,7 @@ def detrend_dims(data, dim=None, verbose=False, **kwargs):
 
 def regress_dims(
     denom, numer, dim=None, stat=None, coords=None, weights=None,
-    correct=None, pctile=True, noweight=False, nobnds=False, nofit=None,
+    correct=None, pctile=True, manual=False, nobnds=False, nofit=None,
 ):
     """
     Return regression parameters.
@@ -251,7 +251,7 @@ def regress_dims(
         The regression denominator and numerator.
     dim : str, default: 'time'
         The regression dimension(s). Parsed by climopy.
-    stat : {'proj', 'covar', 'corr', 'rsq'}, optional
+    stat : {'slope', 'proj', 'covar', 'corr', 'rsq'}, optional
         Whether to return the input statistic instead of slope.
     coords : array-like, optional
         The coordinates used for the fit. Default is `denom`.
@@ -263,9 +263,9 @@ def regress_dims(
     pctile : bool or float, optional
         Whether to return percentiles bounds or standard error deviations. If float
         this is the percentile range. If sequence then ``pctile`` coordinate is added.
-    noweight : bool, optional
-        Whether to skip weighting by cell measures (e.g. duration). If ``True``
-        user-input `weights` can still be used.
+    manual : bool, optional
+        Whether to skip automatic weighting by cell measures (e.g. duration) and infer
+        degrees of freedom from input weights (if provided) instead of sample count.
     nobnds : bool, optional
         Whether to skip calculating statistic bounds. If ``True`` only the
         first argument is returned.
@@ -304,7 +304,7 @@ def regress_dims(
     time = denom.coords['time'] if dim == 'time' and denom.name == 'time' else None
     if stat and not nofit:
         raise ValueError(f'Incompatible arguments {stat=} {nofit=}.')
-    if noweight:  # input weights only not infer weights
+    if manual:  # input weights only not infer weights
         wgts = xr.ones_like(denom) if weights is None else weights
     else:  # infer automatically (_parse_weights raises error if missing)
         numer = numer.climo.add_cell_measures()
@@ -321,7 +321,6 @@ def regress_dims(
     denom, numer, wgts = xr.broadcast(denom, numer, wgts)  # broadcast other coordinates
     nulls = numer.isnull() | denom.isnull()
     numer, denom, wgts = numer.where(~nulls), denom.where(~nulls), wgts.where(~nulls)
-    wgts = wgts / wgts.sum(dims)  # note now (w * d).sum() is effectively d.sum() / n
 
     # Calculate statistic
     # NOTE: This defines projection 'standard error' as regression error formula times
@@ -334,6 +333,11 @@ def regress_dims(
     # and slope stderr = sqrt(resid ** 2 / xanom ** 2 / n - 2) where resid =
     # y - ((ymean - slope * xmean) + slope * x) = (y - ymean) - slope * (x - xmean)
     # https://en.wikipedia.org/wiki/Simple_linear_regression#Normality_assumption
+    if manual:  # degrees of freedom from weights
+        size = wgts.sum(dims).item()
+    else:  # normalize and get size
+        size = math.prod(numer.sizes[key] for key in dims)
+    wgts = wgts / wgts.sum(dims)  # now (w * d).sum() is effectively d.sum() / n
     davg = (wgts * denom).sum(dims, skipna=True)
     navg = (wgts * numer).sum(dims, skipna=True)
     covar = wgts * (denom - davg) * (numer - navg)
@@ -378,7 +382,7 @@ def regress_dims(
         correct = time is not None if correct is None else correct
         correct = 'r' if correct is True else correct or ''
         if not correct:
-            seq, corr = None, xr.zeros_like(slope)
+            seq = None
         elif dim is None:
             raise ValueError(f'Too many dimensions {dims!r} for {correct=}.')
         elif correct == 'x':
@@ -393,18 +397,20 @@ def regress_dims(
             raise ValueError(f"Invalid {correct=}. Must be 'x' or 'y'.")
         if seq is not None and time is not None:
             seq = seq.assign_coords({'time': time})
-        if seq is not None:
-            seq = detrend_dims(seq, noweight=noweight, correct=False)
+        if seq is None:
+            auto = xr.zeros_like(slope)
+        else:  # get adjustment factor
+            seq = detrend_dims(seq, manual=manual, correct=False)
             seq1 = seq.isel({dim: slice(1, None)})
             assign = {dim: seq1.coords[dim].values}
             seq2 = seq.isel({dim: slice(None, -1)}).assign_coords(assign)
             sigma = ((seq - savg) ** 2).mean(dim, skipna=True)
-            corr = ((seq1 - savg) * (seq2 - savg)).mean(dim, skipna=True) / sigma
-        corr = np.clip(corr, 0, None)
-        scale = ((1 - corr) / (1 + corr))  # effective samples
-        dof = math.prod(numer.sizes[key] for key in dims) * scale - 2  # see above
-        dof.attrs['units'] = ''
-        dofs[correct] = dof
+            auto = ((seq1 - savg) * (seq2 - savg)).mean(dim, skipna=True) / sigma
+        auto = np.clip(auto, 0, None)
+        scale = (1 - auto) / (1 + auto)  # effective samples
+        idof = size * scale - 2  # see above
+        idof.attrs['units'] = ''
+        dofs[correct] = idof
     if len(dofs) == 1:
         _, dof = dofs.popitem()
     else:
@@ -430,16 +436,16 @@ def regress_dims(
     if not nobnds and stat in ('corr', 'covar'):  # see wikipedia correlation page
         base = np.sqrt(dvar) * np.sqrt(nvar)
         corr = covar / base
-        sigma = np.sqrt((1 - corr ** 2) / dof)
+        sigma = np.sqrt((1 - corr ** 2) / dof)  # correlation error
         ibnds.append((corr / sigma, sigma))
     elif not nobnds:  # see wikipedia simple linear regression page
         fit = (offset + dsort * slope).transpose(*dims, ...)
         resid = (wsort * (nsort - fit) ** 2).sum(dims, skipna=True)
-        sigma = np.sqrt(resid / dvar / dof)
+        sigma = np.sqrt(resid / dvar / dof)  # regression error
         ibnds.append((slope, sigma))
     if not nofit:  # only allowed if not corr and not covar
-        danom = wsort * (dsort - davg) ** 2 / dvar
-        danom = danom + danom.mean(dims, skipna=True)  # valid after testing
+        danom = (dsort - davg) ** 2 / dvar / size
+        danom = danom + (wsort * danom).sum(dims, skipna=True)  # valid after testing
         sigma = np.sqrt(danom * resid)  # approximate
         ibnds.append((fit, sigma))
     for base, sigma in ibnds:

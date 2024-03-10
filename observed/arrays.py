@@ -334,7 +334,7 @@ def regress_dims(
     # y - ((ymean - slope * xmean) + slope * x) = (y - ymean) - slope * (x - xmean)
     # https://en.wikipedia.org/wiki/Simple_linear_regression#Normality_assumption
     if manual:  # degrees of freedom from weights
-        size = wgts.sum(dims).item()
+        size = wgts.sum(dims)
     else:  # normalize and get size
         size = math.prod(numer.sizes[key] for key in dims)
     wgts = wgts / wgts.sum(dims)  # now (w * d).sum() is effectively d.sum() / n

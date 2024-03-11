@@ -69,7 +69,7 @@ TRANSLATE_PARAMS = {
     ('internal', True): ('error', 'internal'),
 }
 TRANSLATE_PARAMS.update(  # _parse_coords sets 'None'
-    {('years', True): ('period', '20yr')},  # default value
+    {('years', True): ('period', '20yr'), ('month', None): ('start', 'init')},
 )
 TRANSLATE_PARAMS.update(  # _parse_coords sets 'None'
     {('month', n): ('start', datetime(1, n, 1).strftime('%b')) for n in range(1, 13)},
@@ -176,6 +176,16 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
         Whether to use faster default options.
     **kwargs
         Passed to `_parse_names` or `calc_feedback`.
+
+    Returns
+    -------
+    params : dict
+        The vectorized keyword arguments `source`, `years`, `month`, `annual`,
+        `anomaly`, `detrend`, `correct` (translated into `version`).
+    parts : dict
+        The vectorized keyword arguments `wav`, `sky`, and `cld`.
+    kwargs : dict
+        The additional keyword arguments.
     """
     names = kwargs.pop('name', None)
     skip_keys = (skip_keys,) if isinstance(skip_keys, str) else tuple(skip_keys or ())
@@ -186,12 +196,12 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
             key: tuple(value for value in values if value not in skip_values)
             for key, values in defaults.items() if key not in skip_keys
         }
-        inputs = {key: kwargs.pop(key, value) for key, value in defaults.items()}
-        inputs = {key: value if isinstance(value, (list, tuple)) else (value,) for key, value in inputs.items()}  # noqa: E501
+        parts = {key: kwargs.pop(key, value) for key, value in defaults.items()}
+        parts = {key: value if isinstance(value, (list, tuple)) else (value,) for key, value in parts.items()}  # noqa: E501
     elif label := ', '.join(f'{key}={value!r}' for key, value in kwargs.items() if key in PARTS_DEFAULT and value is not None):  # noqa: E501
         raise TypeError(f'Keyword arguments {label} incompatible with {names}={names!r}.')  # noqa: E501
     else:
-        inputs = {'name': (names,) if isinstance(names, str) else tuple(names)}
+        parts = {'name': (names,) if isinstance(names, str) else tuple(names)}
     defaults = PARAMS_TESTING.copy() if testing else PARAMS_DEFAULT.copy()
     defaults = {
         key: tuple(value for value in values if value not in skip_values)
@@ -204,7 +214,7 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
         params.pop('source', None)
     if 'correct' not in skip_keys:
         kwargs.setdefault('correct', correct)
-    return inputs, params, kwargs
+    return params, parts, kwargs
 
 
 def calc_feedback(
@@ -461,7 +471,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
         print('(', end=' ')
     else:  # print message
         print('Calculating global climate feedbacks.')
-    inputs, params, kwargs = _parse_kwargs(**kwargs)
+    params, parts, kwargs = _parse_kwargs(**kwargs)
     translate = kwargs.pop('translate', None)
     results = {}
     for values in itertools.product(*params.values()):
@@ -469,19 +479,20 @@ def process_scalar(dataset=None, output=None, **kwargs):
         coord = _parse_coords(dataset.time, translate, **kwarg)
         kwarg.update(kwargs)
         years = kwarg.get('years', None)
+        source = kwarg.pop('source', None) or ''
+        source = '' if source in ('eraint',) else source
         sample = years is not None and np.isscalar(years)
         level, _ = TRANSLATE_PARAMS['internal', None]
-        levels = (*coord, level, 'correct')  # see below
+        levels = ('source', *coord, level, 'correct')  # see below
         result = [{}, {}] if sample else [{}]
         internals = (False, True) if sample else (False,)
         if output is False:  # succinct information
             print('-'.join(filter(None, coord.values())), end=' ')
         else:  # detailed information
             print(' '.join(f'{key} {value!r}' for key, value in coord.items()))
-        for values in itertools.product(*inputs.values()):
+        for values in itertools.product(*parts.values()):
             kw = dict(nofit=True, pctile=False, **kwarg)  # pctile=False -> +/- sigma
-            opts = dict(zip(inputs, values))
-            source = kw.pop('source', None) or ''
+            opts = dict(zip(parts, values))
             if not source:  # _parse_kwargs only keeps if 'names' not passed
                 name, cld, wav, sky = values[0], '', '', ''
             else:  # _parse_kwargs handles incompatibilities
@@ -502,7 +513,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
                     count = dof.mean('sample') if sample else dof
                 delta1, delta2 = var._dist_bounds(error, dof=count, pctile=True)  # 95%
                 delta = xr.DataArray(delta2 - delta1, dims=error.dims)
-                concat = xr.DataArray(['mean', 'sigma', 'range', 'dof'], dims='statistic')  # noqa: E501
+                concat = xr.DataArray(['slope', 'sigma', 'range', 'dof'], dims='statistic')  # noqa: E501
                 concat = xr.concat((mean, error, delta, count), dim=concat)
                 concat.attrs.update(lam.attrs)  # update attributes
                 result[internal][f'{flux}_lam'] = concat

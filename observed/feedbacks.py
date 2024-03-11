@@ -25,11 +25,6 @@ LABELS_CLOUD = {
     'ce': 'cloud effect',
     'cld': 'He et al. cloud',
 }
-LABELS_SOURCE = {
-    'he': 'He et al.',
-    'gis': 'GISTEMP4',
-    'had': 'HadCRUT5',
-}
 LABELS_WAVELEN = {
     'f': 'net',
     'l': 'longwave',
@@ -37,6 +32,19 @@ LABELS_WAVELEN = {
     'u': 'reflected',
     'd': 'insolation',
 }
+
+# Temperature source labels
+LABELS_SOURCE = {
+    'he': 'He et al.',
+    'gis': 'GISTEMP4',
+    'had': 'HadCRUT5',
+}
+LONGS_SOURCE = {
+    'he': 'external',
+    'gis': 'gistemp',
+    'had': 'hadcrut',
+}
+
 
 # Feedback default arguments
 PARTS_DEFAULT = {
@@ -48,7 +56,7 @@ PARTS_TESTING = {key: value[:2] for key, value in PARTS_DEFAULT.items()}
 PARAMS_DEFAULT = {
     'source': ('gis', 'had'),
     'years': (None,),  # named 'period'
-    'month': ('mar', 'dec', 'jun'),  # named 'start'
+    'month': ('mar', 'dec', 'jun'),  # named 'initial'
     'annual': (False, True),  # named 'style'
     'anomaly': (True, False),  # named 'remove'
     'detrend': ('xy', 'x', 'y', ''),
@@ -69,10 +77,10 @@ TRANSLATE_PARAMS = {
     ('internal', True): ('error', 'internal'),
 }
 TRANSLATE_PARAMS.update(  # _parse_coords sets 'None'
-    {('years', True): ('period', '20yr'), ('month', None): ('start', 'init')},
+    {('years', True): ('period', '20yr'), ('month', None): ('initial', 'init')},
 )
 TRANSLATE_PARAMS.update(  # _parse_coords sets 'None'
-    {('month', n): ('start', datetime(1, n, 1).strftime('%b')) for n in range(1, 13)},
+    {('month', n): ('initial', datetime(1, n, 1).strftime('%b')) for n in range(1, 13)},
 )
 
 
@@ -92,6 +100,15 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
         The flux sky component. One of ``''``, ``'cs'``, ``'ce'``.
     sfc : str, default: 't'
         The flux boundary. One of ``'t'``, ``'s'``, ``'a'``.
+
+    Returns
+    -------
+    temps, fluxes : list of str
+        The temperature and flux variable(s).
+    templabels, fluxlabels : list of str, optional
+        The temperature and flux readable labels.
+    pathlabel : str
+        The path label suitable for figures.
     """
     sources = ('gis', 'had') if source is None else source  # pass False or () to skip
     sources = () if not sources else (source,) if isinstance(source, str) else sources
@@ -136,8 +153,8 @@ def _parse_coords(time, translate=None, **kwargs):
     year0 = time[0].dt.year.item()
     year1 = time[-1].dt.year.item() + int(time[-1].dt.month.item() == 12)
     translate = {**TRANSLATE_PARAMS, **(translate or {})}
-    translate.setdefault(('month', None), ('period', month.lower()))
-    translate.setdefault(('years', None), ('period', f'{year1 - year0}yr'))
+    translate.setdefault(('month', None), ('initial', month.lower()))
+    translate.setdefault(('years', None), ('period', f'{year0}-{year1}'))
     coords = {}
     for key, value in kwargs.items():
         if key in ('pctile', 'correct'):  # concatenated by calc_feedback
@@ -146,6 +163,8 @@ def _parse_coords(time, translate=None, **kwargs):
             name, _ = translate[key, None]
         else:  # e.g. 'source' and 'detrend'
             name = key
+        if key == 'source':
+            value = LONGS_SOURCE.get(value, value)  # e.g. 'eraint' models
         if isinstance(value, slice):
             value = (value.start, value.stop)
         if np.iterable(value) and not isinstance(value, str):
@@ -154,8 +173,6 @@ def _parse_coords(time, translate=None, **kwargs):
             _, value = translate[key, value]
         elif key == 'years' and np.isscalar(value):
             value = f'{np.array(value).item()}yr'
-        elif key == 'years' and np.iterable(value):
-            value = f'{(value[1] or year1) - (value[0] or year0)}yr'
         else:  # fallback version label
             value = '-'.join(map(str, np.atleast_1d(value).tolist()))
         coords[name] = value
@@ -395,7 +412,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
     if 'correct' in kwargs or 'pctile' in kwargs:
         raise TypeError('Invalid input arguments.')
     skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cld')
-    parts, params, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
+    params, parts, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
     results = []
     for values in itertools.product(*params.values()):
         # Create dataset and calculate climate feedbacks
@@ -404,7 +421,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         kw = dict(zip(params, values))
         style = 'annual' if kw['annual'] else 'monthly'
         remove = 'average' if kw['anomaly'] else 'climate'
-        source = LABELS_SOURCE[kw['source']][:-1].lower()
+        source = LONGS_SOURCE[kw['source']]
         kw_filter = {**kwargs, 'anomaly': kw.pop('anomaly', True)}
         kw_fluxes = dict(style=style, components=('', 'cs'), boundaries=('t',))
         dataset = annual_filter(dataset, **kw_filter)
@@ -480,10 +497,9 @@ def process_scalar(dataset=None, output=None, **kwargs):
         kwarg.update(kwargs)
         years = kwarg.get('years', None)
         source = kwarg.pop('source', None) or ''
-        source = '' if source in ('eraint',) else source
         sample = years is not None and np.isscalar(years)
         level, _ = TRANSLATE_PARAMS['internal', None]
-        levels = ('source', *coord, level, 'correct')  # see below
+        levels = (*coord, level, 'correct')  # see below
         result = [{}, {}] if sample else [{}]
         internals = (False, True) if sample else (False,)
         if output is False:  # succinct information
@@ -499,7 +515,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
                 name, cld, wav, sky = '', *(opts[key] for key in ('cld', 'wav', 'sky'))
             if sky == 'cld':  # workaround
                 cld, sky = sky, ''
-            temp = f'ts_{source}'.strip('_')
+            temp = f'ts_{source[:3]}'.strip('_')
             flux = name or f'{cld}_r{wav}nt{sky}'.strip('_')
             lam, sigma1, sigma2, dof, *_ = calc_feedback(dataset, temp, flux, **kw)
             mean = lam.mean('sample') if sample else lam
@@ -525,7 +541,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
 
     # Concatenate and save data
     # NOTE: Here calc_feedack() returns array with 'correct' coordinate for speed, then
-    # combine as ('source', 'period', 'start', 'style', 'remove', 'detrend', 'correct').
+    # combine ('source', 'period', 'initial', 'style', 'remove', 'detrend', 'correct').
     if not results:
         raise RuntimeError('No datasets created.')
     result = xr.concat(

@@ -22,8 +22,8 @@ __all__ = ['calc_feedback', 'process_spatial', 'process_scalar']
 LABELS_CLOUD = {
     '': 'all-sky',
     'cs': 'clear-sky',
-    'ce': 'cloud effect',
-    'cld': 'He et al. cloud',
+    'ce': 'cloud',
+    'cld': 'cloud',
 }
 LABELS_WAVELEN = {
     'f': 'net',
@@ -56,7 +56,7 @@ PARTS_TESTING = {key: value[:2] for key, value in PARTS_DEFAULT.items()}
 PARAMS_DEFAULT = {
     'source': ('gis', 'had'),
     'years': (None,),  # named 'period'
-    'month': ('mar', 'dec', 'jun'),  # named 'initial'
+    'month': ('jan', 'jul'),  # named 'initial'
     'annual': (False, True),  # named 'style'
     'anomaly': (True, False),  # named 'remove'
     'detrend': ('xy', 'x', 'y', ''),
@@ -227,8 +227,6 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
     params = {key: kwargs.pop(key, value) for key, value in defaults.items()}
     params = {key: value if isinstance(value, (list, tuple)) else (value,) for key, value in params.items()}  # noqa: E501
     correct = params.pop('correct', True)  # regress_dims() creates coordinate
-    if names is not None:  # not used e.g. model data
-        params.pop('source', None)
     if 'correct' not in skip_keys:
         kwargs.setdefault('correct', correct)
     return params, parts, kwargs
@@ -497,6 +495,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
         kwarg.update(kwargs)
         years = kwarg.get('years', None)
         source = kwarg.pop('source', None) or ''
+        source = source if source[:3] in ('had', 'gis') else ''
         sample = years is not None and np.isscalar(years)
         level, _ = TRANSLATE_PARAMS['internal', None]
         levels = (*coord, level, 'correct')  # see below

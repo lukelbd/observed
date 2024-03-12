@@ -38,10 +38,10 @@ def load_ceres(base=None, file=None, clim=None, average=True, anomaly=True, **kw
     # to prevent discontinuity when satellites change (however could try to detect).
     base = Path(base or '~/data/ceres').expanduser()
     if average:
-        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202302_global.nc'
+        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202312_global.nc'
         clim = clim or 'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_global.nc'
     else:
-        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202302_standardized.nc'
+        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202312_standardized.nc'
         clim = clim or 'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_standardized.nc'
     paths = (clim, file) if anomaly else (file,)
     datas = []

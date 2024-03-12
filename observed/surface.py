@@ -82,9 +82,9 @@ def load_hadcrut(base=None, file=None, average=True, **kwargs):
     # not just Gregory regression uncertainty like in He et al.?
     base = Path(base or '~/data/hadcrut5').expanduser()
     if average:
-        path = file or 'HadCRUT.5.0.1.0.analysis.summary_series.global.monthly.nc'
+        path = file or 'HadCRUT.5.0.2.0.analysis.summary_series.global.monthly.nc'
     else:
-        path = file or 'HadCRUT.5.0.1.0.analysis.anomalies.ensemble_mean_standardized.nc'  # noqa: E501
+        path = file or 'HadCRUT.5.0.2.0.analysis.anomalies.ensemble_mean_standardized.nc'  # noqa: E501
     if not isinstance(path, Path) and '/' not in path:
         path = base / path
     if not path.is_file():

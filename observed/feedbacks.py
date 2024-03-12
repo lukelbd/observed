@@ -56,7 +56,7 @@ PARTS_TESTING = {key: value[:2] for key, value in PARTS_DEFAULT.items()}
 PARAMS_DEFAULT = {
     'source': ('gis', 'had'),
     'years': (None,),  # named 'period'
-    'month': ('mar', 'dec', 'jun'),  # named 'initial'
+    'month': ('jan', 'jul'),  # named 'initial'
     'annual': (False, True),  # named 'style'
     'anomaly': (True, False),  # named 'remove'
     'detrend': ('xy', 'x', 'y', ''),
@@ -150,8 +150,7 @@ def _parse_coords(time, translate=None, **kwargs):
     # 'nov' then version label will still be e.g. '23yr' even though annual_filter()
     # restricts record to 22 years (i.e. full 12-month blocks). Keep for consistency.
     month = time[0].dt.strftime('%b').item()
-    year0 = time[0].dt.year.item()
-    year1 = time[-1].dt.year.item() + int(time[-1].dt.month.item() == 12)
+    year0, year1 = time[0].dt.year.item(), time[-1].dt.year.item()
     translate = {**TRANSLATE_PARAMS, **(translate or {})}
     translate.setdefault(('month', None), ('initial', month.lower()))
     translate.setdefault(('years', None), ('period', f'{year0}-{year1}'))
@@ -488,6 +487,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
         print('(', end=' ')
     else:  # print message
         print('Calculating global climate feedbacks.')
+    testing = kwargs.get('testing', False)
     params, parts, kwargs = _parse_kwargs(**kwargs)
     translate = kwargs.pop('translate', None)
     results = {}
@@ -570,7 +570,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
         print(')', end=' ')
     else:  # save result
         base = Path('~/data/global-feedbacks').expanduser()
-        file = 'feedbacks_CERES_global.nc'
+        file = 'tmp.nc' if testing else 'feedbacks_CERES_global.nc'
         if isinstance(output, str) and '/' not in output:
             output = base / output
         elif output:

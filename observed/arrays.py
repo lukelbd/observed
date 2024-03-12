@@ -503,8 +503,10 @@ def standardize_dims(data):  # noqa: U100
     # TODO: Translate the following bash code to pycdo. See cmip_data process.py
     # for folder in ceres gistemp4 hadcrut5; do
     #   for file in ~/data/$folder/*.nc; do
-    #     [[ "$file" =~ global|weights ]] && continue
+    #     output=${file%.nc}_standardized.nc
+    #     [[ "$file" =~ global|weights|standardized ]] && continue
+    #     [ -r "$output" ] && continue
     #     echo "Remapping file: ${file#$HOME/}"
-    #     cdo remapcon,r72x36 "$file" "${file%.nc}_standardized.nc"
+    #     cdo remapcon,r72x36 "$file" "$output"
     #   done
     # done

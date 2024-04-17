@@ -13,7 +13,7 @@ import pandas as pd
 import xarray as xr
 from climopy import var, ureg, vreg  # noqa: F401
 
-from .datasets import load_dataset
+from .datasets import open_dataset
 from .arrays import annual_average, annual_filter, detrend_dims, regress_dims
 
 __all__ = ['calc_feedback', 'process_spatial', 'process_scalar']
@@ -23,7 +23,7 @@ LABELS_CLOUD = {
     '': 'all-sky',
     'cs': 'clear-sky',
     'ce': 'cloud effect',
-    'cld': 'He et al. cloud',
+    'cld': 'cloud',
 }
 LABELS_WAVELEN = {
     'f': 'net',
@@ -35,7 +35,7 @@ LABELS_WAVELEN = {
 
 # Temperature source labels
 LABELS_SOURCE = {
-    'he': 'He et al.',
+    'he': 'GISTEMP4',
     'gis': 'GISTEMP4',
     'had': 'HadCRUT5',
 }
@@ -64,7 +64,7 @@ PARAMS_DEFAULT = {
 }
 PARAMS_TESTING = {key: value[:2] for key, value in PARAMS_DEFAULT.items()}
 
-# Parameter coordinate translations
+# Parameter coordinate translatons
 TRANSLATE_PARAMS = {
     ('annual', None): ('style', 'monthly'),
     ('annual', False): ('style', 'monthly'),
@@ -114,17 +114,18 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
     sources = () if not sources else (source,) if isinstance(source, str) else sources
     wavs = ('f', 's', 'l') if wav is None else wav  # pass False or () to skip
     wavs = () if not wavs else (wav,) if isinstance(wav, str) else wavs
-    cld = 'cld' if cld is True else cld
-    sky = '' if sky is None else sky
-    sfc = 't' if sfc is None else sfc
+    cld = 'cld' if cld is True else cld or ''
+    sky = 'ce' if sky is True else sky or ''
+    sfc = 's' if sfc is True else sfc or 't'
+    rads = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)
     temps = tuple(f'ts_{source}' for source in sources)
-    names = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)  # noqa: E501
-    fluxes = tuple(f'{cld}_{part}' if cld else f'{part}{sky}' for part in names)
-    prefix = 'ts-' + '-'.join(sources)
-    suffix = cld if cld is not None else sky
+    fluxes = tuple(f'{cld}_{part}' if cld else f'{part}{sky}' for part in rads)
+    cloudlabel = LABELS_CLOUD[cld or sky]  # cloud label
+    templabel = '-'.join(filter(None, ('ts', *sources)))
+    fluxlabel = '-'.join(filter(None, (*rads, cld or sky)))
+    pathlabel = '_'.join(filter(None, (templabel, fluxlabel)))
     templabels = [LABELS_SOURCE[source] for source in sources]
-    fluxlabels = [f'{LABELS_WAVELEN[wav]}' for wav in wavs]
-    pathlabel = '_'.join(filter(None, (prefix, '-'.join(names), suffix)))
+    fluxlabels = [' '.join(filter(None, (LABELS_WAVELEN[wav], cloudlabel))) for wav in wavs]  # noqa: E501
     return temps, fluxes, templabels, fluxlabels, pathlabel
 
 
@@ -392,7 +393,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
     Parameters
     ----------
     dataset : xarray.Dataset, optional
-        The input dataset. Default is ``load_dataset(globe=True)``.
+        The input dataset. Default is ``open_dataset(globe=True)``.
     output : path-like, optional
         The output directory or name. If ``False`` nothing is saved.
     **kwargs
@@ -407,7 +408,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
     from cmip_data.feedbacks import _feedbacks_from_fluxes
     from coupled.process import get_result
     if dataset is None:  # load local observations
-        dataset = load_dataset(globe=False)
+        dataset = open_dataset(globe=False)
     if not isinstance(dataset, xr.Dataset):
         raise ValueError('Input argument must be a dataset.')
     if 'correct' in kwargs or 'pctile' in kwargs:
@@ -472,7 +473,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     Parameters
     ----------
     dataset : xarray.Dataset, optional
-        The input dataset. Default is ``load_dataset(globe=False)``.
+        The input dataset. Default is ``open_dataset(globe=False)``.
     output : bool or path-like, optional
         The output directory or name. If ``False`` nothing is saved.
     **kwargs
@@ -482,7 +483,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     # NOTE: Unlike 'coupled' feedback calculations this has coordinates for several
     # variant calculations. In future should allow this for non-scalar estimates.
     if dataset is None:  # load global average observations
-        dataset = load_dataset(globe=True)
+        dataset = open_dataset(globe=True)
     if not isinstance(dataset, xr.Dataset):
         raise ValueError('Input argument must be a dataset.')
     if output is False:  # begin printing

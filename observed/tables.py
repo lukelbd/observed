@@ -218,7 +218,7 @@ def detrend_time(data, base=None):
     return result, trend
 
 
-def reduce_time(data, time=None, lag=None):
+def reduce_time(data, time=None, lag=None, trunc=None):
     """
     Reduce over time index using monthly selection or seasonal or annual averages.
 
@@ -230,6 +230,8 @@ def reduce_time(data, time=None, lag=None):
         The month or season or time frequency indicator.
     lag : int, optional
         The number of months to lag the data.
+    trunc : int, optional
+        The number of months to optionally truncate. If ``True`` truncate to one point.
 
     Returns
     -------
@@ -241,8 +243,9 @@ def reduce_time(data, time=None, lag=None):
         A suitable filename string.
     """
     # Parse input argument
-    # TODO: Merge this with 'coupled/reduce' reduce_time(). This has superset of
-    # features and supports specifying generalized selection with single argument.
+    # TODO: Merge this with 'coupled/reduce' _get_datetime(), 'cmip_data.utils'
+    # average_preiods(), and climopy 'climopy/accessor' sel_time(). This has superset
+    # of features and supports specifying generalized times with single argument.
     months = None  # initial months
     units = getattr(data, 'units', None)
     data = getattr(data, 'magnitude', data)
@@ -271,6 +274,8 @@ def reduce_time(data, time=None, lag=None):
     # Get annual or season average
     # NOTE: Here use '.mul' and '.div' since 'df * [array|index|series]' evaluates
     # along columns (i.e. row major order) and 'df1 * df2' matches column names.
+    imax = len(months) - 1
+    months = months % 12 + 1  # WARNING: must come after above season string
     if months is None:
         raise ValueError(f'Unknown time identifier {time!r}.')
     if months.size == 12:  # annual average
@@ -279,7 +284,10 @@ def reduce_time(data, time=None, lag=None):
         label = name = SEASON_MONTHS[months.min() - 1:months.max()]
     elif date := datetime(1800, months.item(), 1):  # single month
         label, name = date.strftime('%B'), date.strftime('%b').lower()
-    months = months % 12 + 1  # WARNING: must come after above season string
+    if trunc is True:  # e.g. DJF --> J, NDJF --> DJ
+        months = months[imax // 2:imax // 2 + 1 + (imax % 2)]
+    else:  # truncate by input
+        months = months[trunc:trunc and -trunc or None]
     loc0 = [t for t, time in enumerate(data.index) if time.month == months[0]]
     loc1 = [t for t, time in enumerate(data.index) if time.month == months[-1]]
     data = data.iloc[loc0[0]:loc1[-1] + 1]  # omit incomplete seasons

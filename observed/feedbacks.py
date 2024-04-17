@@ -264,9 +264,11 @@ def calc_feedback(
     Returns
     -------
     lam, lam_lower, lam_upper : xarray.DataArray
-        The feedbacks for the input settings.
+        The feedback estimate.
+    dof : xarray.DataArray
+        The degrees of freedom.
     fit, fit_lower, fit_upper : xarray.DataArray
-        The Gregory regresson fit for the input settings.
+        The regresson fit.
     """
     # Get the data arrays
     # NOTE: Here 'years' is used to both specify period size when bootstrapping control
@@ -295,10 +297,10 @@ def calc_feedback(
     else:  # user input values
         temp, flux = args
     if detrend in ('xy', 'yx') or detrend is True:
-        idxs = (1, 0)
-    elif detrend == 'x':  # temp only
-        idxs = (1,)
+        idxs = (0, 1)
     elif detrend == 'y':  # flux only
+        idxs = (1,)
+    elif detrend == 'x':  # temp only
         idxs = (0,)
     elif not detrend:
         idxs = ()

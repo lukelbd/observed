@@ -22,7 +22,6 @@ __all__ = [
     'annual_filter',
     'detrend_dims',
     'regress_dims',
-    'standardize_dims',
 ]
 
 # Message cache
@@ -216,11 +215,12 @@ def detrend_dims(data, dim=None, verbose=False, **kwargs):
             beta = beta.climo.average('area')
         if 'lon' in dof.sizes and 'lat' in dof.sizes:
             dof = dof.climo.add_cell_measures()
-            dof = dof.climo.average('area').item()  # 'units' can now be missing
+            dof = dof.climo.average('area')  # 'units' can now be missing
+        degrees = f'{dof.item():.0f}'
         trend = f'{10 * beta.item(): >5.2f}'
         units = data.attrs.get('units', None)
         header = name or 'unknown'
-        message = f'{header: >8s} trend: {trend} {units} / decade (dof {dof:.0f})'
+        message = f'{header: >8s} trend: {trend} {units} / decade (dof {degrees})'
         if message not in VERBOSE_MESSAGES:
             print(message)
         VERBOSE_MESSAGES.add(message)
@@ -302,7 +302,7 @@ def regress_dims(
     dims = denom.climo._parse_dims(dim or 'time', **kw_dims)  # must be in denominator!
     dim = dims[0] if len(dims) == 1 else None  # single coordinate
     time = denom.coords['time'] if dim == 'time' and denom.name == 'time' else None
-    if stat and not nofit:
+    if (stat and stat != 'slope') and not nofit:
         raise ValueError(f'Incompatible arguments {stat=} {nofit=}.')
     if manual:  # input weights only not infer weights
         wgts = xr.ones_like(denom) if weights is None else weights
@@ -380,7 +380,7 @@ def regress_dims(
     dofs = {}
     for correct in np.atleast_1d(correct):
         correct = time is not None if correct is None else correct
-        correct = 'r' if correct is True else correct or ''
+        correct = 'r' if correct and not isinstance(correct, str) else correct or ''
         if not correct:
             seq = None
         elif dim is None:
@@ -429,7 +429,7 @@ def regress_dims(
     isel = {}
     bnds, ibnds = [], []  # store individual bounds
     dsort, nsort, wsort = denom, numer, wgts
-    if not nofit and dim is not None:  # sort to make plotting easier
+    if not nofit and dim is not None and denom.ndim == 1:  # sort to improve plots
         axis = denom.dims.index(dim)
         isel = {dim: np.argsort(denom.values, axis=axis)}
         dsort, nsort, wsort = denom.isel(isel), numer.isel(isel), wgts.isel(isel)
@@ -484,29 +484,3 @@ def regress_dims(
         fit.coords.update({'x': xdata, 'y': ydata, 'base': navg})
         fits.append(fit)
     return result if nobnds and nofit else (result, *bnds, *fits, rsq, dof)
-
-
-def standardize_dims(data):  # noqa: U100
-    """
-    Standardize data onto the same horizontal grid.
-
-    Parameters
-    ----------
-    data : xarray.Dataset or xarray.DataArray
-        The input data.
-
-    Returns
-    -------
-    result : xarray.DataArray
-        The standardized data.
-    """
-    # TODO: Translate the following bash code to pycdo. See cmip_data process.py
-    # for folder in ceres gistemp4 hadcrut5; do
-    #   for file in ~/data/$folder/*.nc; do
-    #     output=${file%.nc}_standardized.nc
-    #     [[ "$file" =~ global|weights|standardized ]] && continue
-    #     [ -r "$output" ] && continue
-    #     echo "Remapping file: ${file#$HOME/}"
-    #     cdo remapcon,r72x36 "$file" "$output"
-    #   done
-    # done

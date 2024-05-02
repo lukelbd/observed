@@ -101,7 +101,7 @@ def open_shared(base=None, ceres=None, gistemp=None, **kwargs):
     flux = assign_dates(flux)
     flux = flux.squeeze(drop=True)  # remove lon and lat
     for name in flux:
-        cloud = 'cld' if 'cloud' in name else ''
+        cloud = 'cl' if 'cloud' in name else ''
         part = 'hi' if 'high' in name else 'lo' if 'low' in name else 'mx' if 'mixed' in name else ''  # noqa: E501
         rad = 'rlnt' if 'LW' in name else 'rsnt' if 'SW' in name else 'rfnt'
         flux = flux.rename({name: f'{cloud}{part}_{rad}'.strip('_')})

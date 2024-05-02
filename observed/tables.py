@@ -244,7 +244,7 @@ def reduce_time(data, time=None, lag=None, trunc=None):
     """
     # Parse input argument
     # TODO: Merge this with 'coupled/reduce' _get_datetime(), 'cmip_data.utils'
-    # average_preiods(), and climopy 'climopy/accessor' sel_time(). This has superset
+    # average_periods(), and climopy 'climopy/accessor' sel_time(). This has superset
     # of features and supports specifying generalized times with single argument.
     months = None  # initial months
     units = getattr(data, 'units', None)

@@ -49,7 +49,7 @@ LONGS_SOURCE = {
 # Feedback default arguments
 PARTS_DEFAULT = {
     'wav': ('f', 'l', 's'),  # separate variable
-    'sky': ('', 'cs', 'ce', 'cld'),  # separate variable
+    'sky': ('', 'cs', 'ce', 'cl'),  # separate variable
     'cld': ('',),  # instead use 'sky'
 }
 PARTS_TESTING = {key: value[:2] for key, value in PARTS_DEFAULT.items()}
@@ -114,7 +114,7 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
     sources = () if not sources else (source,) if isinstance(source, str) else sources
     wavs = ('f', 's', 'l') if wav is None else wav  # pass False or () to skip
     wavs = () if not wavs else (wav,) if isinstance(wav, str) else wavs
-    cld = 'cld' if cld is True else cld or ''
+    cld = 'cl' if cld is True else cld or ''
     sky = 'ce' if sky is True else sky or ''
     sfc = 's' if sfc is True else sfc or 't'
     rads = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)
@@ -413,7 +413,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         raise ValueError('Input argument must be a dataset.')
     if 'correct' in kwargs or 'pctile' in kwargs:
         raise TypeError('Invalid input arguments.')
-    skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cld')
+    skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cl')
     params, parts, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
     results = []
     for values in itertools.product(*params.values()):
@@ -432,7 +432,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         for values in itertools.product(*parts.values()):
             items = dict(zip(parts, values))
             cld, wav, sky = items['cld'], items['wav'], items['sky']
-            cld, sky = (sky, '') if sky == 'cld' else (cld, sky)
+            cld, sky = (sky, '') if sky == 'cl' else (cld, sky)
             name = f'{cld}_r{wav}nt{sky}'.strip('_')
             result[name] = get_result(result, name, time=None)
         names = [name for name in result.data_vars if name[:3] == 'ts_']
@@ -491,6 +491,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     else:  # print message
         print('Calculating global climate feedbacks.')
     testing = kwargs.get('testing', False)
+    suffix = kwargs.get('source', '')
     params, parts, kwargs = _parse_kwargs(**kwargs)
     translate = kwargs.pop('translate', None)
     results = {}
@@ -516,7 +517,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
                 name, cld, wav, sky = values[0], '', '', ''
             else:  # _parse_kwargs handles incompatibilities
                 name, cld, wav, sky = '', *(opts[key] for key in ('cld', 'wav', 'sky'))
-            if sky == 'cld':  # workaround
+            if sky in ('cl', 'cld'):  # workaround
                 cld, sky = sky, ''
             temp = f'ts_{source[:3]}'.strip('_')
             flux = name or f'{cld}_r{wav}nt{sky}'.strip('_')
@@ -572,8 +573,9 @@ def process_scalar(dataset=None, output=None, **kwargs):
     if output is False:  # end printing
         print(')', end=' ')
     else:  # save result
+        suffix = suffix and f'-{suffix}'
         base = Path('~/data/global-feedbacks').expanduser()
-        file = 'tmp.nc' if testing else 'feedbacks_CERES_global.nc'
+        file = 'tmp.nc' if testing else f'feedbacks_CERES_global{suffix}.nc'
         if isinstance(output, str) and '/' not in output:
             output = base / output
         elif output:

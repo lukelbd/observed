@@ -90,7 +90,7 @@ def _parse_columns(columns):
                 name2 = f'{name1[:-1]} mean'
         else:
             for part, replace in (  # simple translations
-                ('atmospheric', 'atmosphere'),
+                ('atmospheric', 'atmos'),
                 ('capita', 'per_capita'),
                 ('land_use', 'land-use'),
                 ('fossil.', 'total'),  # standardize
@@ -216,8 +216,8 @@ def load_budget(sheet=None, base=None, year=None):
     data.index.name = 'year'  # lower-case and assign if missing
     index, units = _parse_columns(data.columns)
     data.columns = index  # include units index level in future
-    if 'atmosphere' in index:
-        names = ['atmosphere']  # enforce standard order
+    if 'atmos' in index:
+        names = ['atmos']  # enforce standard order
         names.extend(name for name in SHEET_PAGES if name in index)
         names.extend(name for name in index if name not in names)
         data = data[names]  # enforce standard column order

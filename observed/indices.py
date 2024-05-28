@@ -15,12 +15,12 @@ __all__ = ['load_index', 'load_indices']
 
 
 # Data source links
-# NOTE: Processes versions of indices e.g. 'ONI' (3-month running mean ERSST5 Nino 3.4
+# Note: Processes versions of indices e.g. 'ONI' (3-month running mean ERSST5 Nino 3.4
 # used operationally by NOAA) or 'centered ENSO' (and 10-year low-pass-filter but
 # instead support this in regression functions. Use climopy lagged regression and
 # spectral filtering tools and subtract monthly 1981-2010 or 1991-2020 climatologies
 # or even cliamte drift-corrected climatologies to get proper index anomalies.
-# NOTE: Raw data is from CPC and CRU while PSL provides links and irregularly-updated
+# Note: Raw data is from CPC and CRU while PSL provides links and irregularly-updated
 # copies. Exceptions are regularly-updated HadISST ENSO indices, not available from CRU
 # site, and regularly-updated CPC/ERSST NAO indices, not available from CPC site. Also
 # NCAR page mostly links to externally hosted data but provides custom HadISST based

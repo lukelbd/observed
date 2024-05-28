@@ -5,6 +5,7 @@ Processing utilities for pandas tables.
 # TODO: Merge with 'arrays.py' and support arbitrary input types. Should leverage
 # public facing abstract-array climopy wrappers.
 from datetime import datetime
+import re
 
 import numpy as np
 import pandas as pd
@@ -254,12 +255,16 @@ def reduce_time(data, time=None, lag=None, trunc=None):
     data = data if lag is None else data.shift(-lag, freq='MS')
     if not isinstance(time, str):
         months = np.atleast_1d(time)
-    elif time in ('ann', 'annual'):
-        months = np.arange(1, 13)  # average starting january
     elif time in ('mon', 'monthly'):
-        label, name = 'monthly', 'mon'
         data = data if units is None else ureg.Quantity(data, units)
+        label, name = 'monthly', 'mon'
         return data, label, name
+    elif time[:3] == 'ann':
+        init = time.split('-')[-1] if '-' in time else '1'
+        init = int(init) if init.isnumeric() else datetime.strptime(init, '%b').month
+        base = datetime(2000, init, 1).strftime('%b').lower()
+        months = np.arange(init, 12 + init) % 12
+        label, name = 'annual', f'ann-{base}'
     else:
         try:
             date = datetime.strptime(time[:3], '%b')
@@ -279,7 +284,7 @@ def reduce_time(data, time=None, lag=None, trunc=None):
     if months is None:
         raise ValueError(f'Unknown time identifier {time!r}.')
     if months.size == 12:  # annual average
-        label, name = 'annual', 'ann'
+        pass
     elif months.size > 1:  # season average
         label = name = SEASON_MONTHS[months.min() - 1:months.max()]
     elif date := datetime(1800, months.item(), 1):  # single month

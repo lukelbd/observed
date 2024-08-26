@@ -146,9 +146,8 @@ def _parse_coords(time, translate=None, **kwargs):
     coords : dict
         The feedback version coordinates.
     """
-    # NOTE: If e.g. have starting month 'jan' for CERES data running from 'mar' to
-    # 'nov' then version label will still be e.g. '23yr' even though annual_filter()
-    # restricts record to 22 years (i.e. full 12-month blocks). Keep for consistency.
+    # NOTE: Here use label e.g. '20yr' for feedbacks constructed from multiple
+    # averages across longer period and e.g. '2000-20223' for singular estimate.
     month = time[0].dt.strftime('%b').item()
     year0, year1 = time[0].dt.year.item(), time[-1].dt.year.item()
     translate = {**TRANSLATE_PARAMS, **(translate or {})}

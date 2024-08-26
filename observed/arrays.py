@@ -30,6 +30,35 @@ __all__ = [
 VERBOSE_MESSAGES = set()
 
 
+def _get_mask(data, ocean=True):
+    """
+    Return land mask using `global_land_mask`.
+
+    Parameters
+    ----------
+    data : xarray.DataArray
+        The input array.
+    ocean : bool, optional
+        Whether to keep ocean or land.
+
+    Returns
+    -------
+    mask : xarray.DataArray
+        A boolean masking array.
+    """
+    from global_land_mask import globe
+    lat = data.lat.values
+    lon = data.lon.values % 180  # convention
+    lon, lat = np.meshgrid(lon, lat)  # creates lat x lon arrays
+    if ocean:  # ocean only
+        mask = globe.is_ocean(lat, lon)
+    else:  # land only
+        mask = globe.is_land(lat, lon)
+    coords = {'lat': data.lat, 'lon': data.lon}
+    mask = xr.DataArray(mask, dims=('lat', 'lon'), coords=coords)
+    return mask
+
+
 def to_decimal(data, dim=None):
     """
     Convert datetime index to decimal year.
@@ -239,8 +268,8 @@ def detrend_dims(data, dim=None, verbose=False, **kwargs):
 
 
 def regress_dims(
-    denom, numer, dim=None, stat=None, coords=None, weights=None,
-    correct=None, pctile=True, manual=False, nobnds=False, nofit=None,
+    denom, numer, dim=None, raw=False, stat=None, ocean=None, weights=None,
+    coords=None, correct=None, pctile=True, manual=False, nobnds=False, nofit=None,
 ):
     """
     Return regression parameters.
@@ -251,12 +280,16 @@ def regress_dims(
         The regression denominator and numerator.
     dim : str, default: 'time'
         The regression dimension(s). Parsed by climopy.
+    raw : bool, optional
+        Whether to skip removing the mean before the projection.
     stat : {'slope', 'proj', 'covar', 'corr', 'rsq'}, optional
         Whether to return the input statistic instead of slope.
-    coords : array-like, optional
-        The coordinates used for the fit. Default is `denom`.
+    ocean : bool, optional
+        Whether to mask to only ocean or only land.
     weights : array-like, optional
         The manual weights used for the fit. Default is nothing.
+    coords : array-like, optional
+        The coordinates used for the fit. Default is `denom`.
     correct : bool or str, optional
         Whether to correct the standard error for reduced degrees of freedom due
         to serial correlation. If sequence then ``correct`` coordinate is added.
@@ -310,6 +343,10 @@ def regress_dims(
         numer = numer.climo.add_cell_measures()
         dims, *parts = numer.climo._parse_weights(dims, weight=weights, **kw_dims)
         wgts = math.prod(wgt.climo.dequantify() for wgts in parts for wgt in wgts)
+    if ocean is not None:  # TODO: improve this
+        mask1 = _get_mask(denom, ocean=ocean)
+        mask2 = _get_mask(numer, ocean=ocean)
+        wgts = xr.where(mask1 | mask2, wgts, 0)
     if time is not None:  # WARNING: must be called after add_cell_measures()
         denom = to_decimal(denom).astype(numer.dtype)
         numer = to_decimal(numer)
@@ -338,8 +375,8 @@ def regress_dims(
     else:  # normalize and get size
         size = math.prod(numer.sizes[key] for key in dims)
     wgts = wgts / wgts.sum(dims)  # now (w * d).sum() is effectively d.sum() / n
-    davg = (wgts * denom).sum(dims, skipna=True)
-    navg = (wgts * numer).sum(dims, skipna=True)
+    davg = 0 if raw else (wgts * denom).sum(dims, skipna=True)
+    navg = 0 if raw else (wgts * numer).sum(dims, skipna=True)
     covar = wgts * (denom - davg) * (numer - navg)
     covar = covar.sum(dims, skipna=True)
     dvar = wgts * (denom - davg) ** 2
@@ -354,7 +391,7 @@ def regress_dims(
     if not stat or stat == 'slope':
         result = slope
         units = f'{numer.units} / {denom.units}'
-    elif stat == 'covar':
+    elif stat == 'cov' or stat == 'covar':
         result = covar
         units = f'{numer.units} {denom.units}'
     elif stat == 'proj':

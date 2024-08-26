@@ -6,11 +6,10 @@ from pathlib import Path
 
 import pandas as pd
 import pint_pandas  # noqa: F401  # define accessor
+from climopy import const, ureg, vreg  # noqa: F401
 from icecream import ic  # noqa: F401
 
-from climopy import const, ureg, vreg  # noqa: F401
-
-__all__ = ['load_budget']
+__all__ = ['load_budget', 'load_budgets']
 
 # Assign climopy unit registry
 # See: https://github.com/hgrecco/pint-pandas/issues/136
@@ -35,6 +34,18 @@ SHEET_PAGES = {
     'land-use': 4,
     'cement': 7,
 }
+SHEET_NAMES = {page: name for name, page in SHEET_PAGES.items()}
+
+# Spreadsheet properties
+SHEET_HEADERS = {
+    'recent': 21,
+    'historical': 15,
+    'ocean': 30,
+    'land': 27,
+    'fossil': 8,
+    'land-use': 36,
+    'cement': 9,
+}
 SHEET_LABELS = {
     'recent': 'Global Carbon Budget',
     'historical': 'Historical Budget',
@@ -44,8 +55,6 @@ SHEET_LABELS = {
     'land': 'Terrestrial Sink',
     'cement': 'Cement Carbonation Sink',
 }
-SHEET_NAMES = {page: name for name, page in SHEET_PAGES.items()}
-SHEET_STARTS = {1: 20, 2: 15, 3: 8, 4: 28, 5: 30, 6: 23, 7: 9}
 
 
 def _parse_columns(columns):
@@ -118,7 +127,7 @@ def _parse_columns(columns):
     return index, units
 
 
-def load_budgets(*sheets, year=None, **kwargs):
+def load_budgets(*sheets, **kwargs):
     """
     Load and combine annual carbon budget spreadsheets.
 
@@ -126,8 +135,6 @@ def load_budgets(*sheets, year=None, **kwargs):
     ----------
     *sheets : str or int, optional
         The sheet name(s) or number(s). Defaults to all.
-    year : int, optional
-        The carbon budget year.
     **kwargs
         Passed to `load_budget`.
 
@@ -136,13 +143,16 @@ def load_budgets(*sheets, year=None, **kwargs):
     data : pandas.DataFrame
         The combined data.
     """
-    # TODO: Add *alternative* 'atmospheric' and 'budget' columns based on individual
-    # components or models from 'fossil', 'land-use', 'ocean', and 'land'. Or build
-    # this into the pulse response least squares minimization function.
+    # NOTE: This is used by model.py _budget_forcing() to create forcing datasets
+    # NOTE: Here 'historical' has preliminary 2023 data so prefer to other sheets
+    def _merge_columns(names):
+        if names[0] in ('budget', 'model', 'models', 'product', 'products'):
+            columns = names[-1]
+        else:  # use unmodified label for e.g. mean models and bookkeeping methods
+            columns = ' '.join(key for key in names if key != 'mean')
+        return columns
     sheets = sheets or list(SHEET_PAGES)
     sheets = [SHEET_NAMES.get(sheet, sheet) for sheet in sheets]
-    if year == 2023:
-        sheets = ['historical']
     if any(sheet not in SHEET_PAGES for sheet in sheets):
         raise ValueError(f'Invalid sheet name(s): {sheets!r}')
     if 'recent' in sheets and 'historical' in sheets:
@@ -157,18 +167,21 @@ def load_budgets(*sheets, year=None, **kwargs):
             units = data.units
             data = data.magnitude
             for name in data.columns:  # apply default dataframes
-                item = data[[name]].rename(columns={name: 'mean'})
-                item = pd.concat([item], names=[name], axis='columns')
-                datas[name] = item
+                rename = {name: 'total' if name == 'fossil' else 'mean'}
+                idata = data[[name]].rename(columns=rename)
+                idata = pd.concat([idata], names=[name], axis='columns')
+                datas[name] = idata
         else:  # concatenate column levels
             data = data.to(units)
             data = data.magnitude
             if isinstance(data.columns, pd.MultiIndex):
-                ignore = ('budget', 'model', 'models', 'product', 'products')
-                func = lambda keys: ' '.join(key for key in keys if key not in ignore)
-                data.columns = data.columns.map(func)
+                index = data.columns.map(_merge_columns)
+                data.columns = index
+            if sheet in datas:  # prefer recent or historical
+                data = pd.merge(datas[sheet], data, how='left')
+                data.index = datas[sheet].index
             datas[sheet] = data
-    data = pd.concat(datas.values(), keys=datas.keys(), axis='columns')
+    data = pd.concat(datas.values(), keys=datas.keys(), axis=1)
     data = ureg.Quantity(data, units)
     return data
 
@@ -196,7 +209,7 @@ def load_budget(sheet=None, base=None, year=None):
     # NOTE: Using data.columns.levels shows unique level values, but may be unsorted,
     # so use get_level_values() to retrieve unit indicator in upper left. Note land
     # use spreadsheet includes headers with extra info on same line that we drop.
-    year = year or 2022  # only 2022 has all sheets
+    year = year or 2023
     version = 1.1 if year == 2023 else 1.0
     file = f'Global_Carbon_Budget_{year}v{version}.xlsx'
     base = Path(base or '~/data/carbon-budget').expanduser()
@@ -208,10 +221,9 @@ def load_budget(sheet=None, base=None, year=None):
         raise ValueError(f'Unknown sheet {sheet!r}. Options are: {options}.')
     name = SHEET_NAMES.get(page, page)
     label = SHEET_LABELS[name]
-    start = SHEET_STARTS[page]
-    land_use = page == 4
-    header = range(start - 1, start + 1 + land_use)  # three headers for land-use
-    page = 1 if year == 2023 else page  # overwrite
+    start = SHEET_HEADERS[name]
+    land_use = page == 4  # three headers for land-use
+    header = range(start - 1, start + 1 + land_use)
     data = pd.read_excel(
         path,
         header=tuple(header),
@@ -222,6 +234,11 @@ def load_budget(sheet=None, base=None, year=None):
     data.index.name = 'year'  # lower-case and assign if missing
     index, units = _parse_columns(data.columns)
     data.columns = index  # include units index level in future
+    if land_use:  # correct model data sign
+        mask1 = index.get_level_values(0) == 'models'
+        mask2 = ~index.get_level_values(1).str.startswith('model')
+        mask = mask1 & mask2  # model columns excluding mean
+        data.iloc[:, mask] *= -1
     if 'atmos' in index:
         names = ['atmos']  # enforce standard order
         names.extend(name for name in SHEET_PAGES if name in index)

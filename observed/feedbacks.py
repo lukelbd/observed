@@ -22,7 +22,9 @@ __all__ = ['calc_feedback', 'process_spatial', 'process_scalar']
 LABELS_CLOUD = {
     '': 'all-sky',
     'cs': 'clear-sky',
+    'ncl': 'clear-sky',
     'ce': 'cloud',
+    'cl': 'cloud',
     'cld': 'cloud',
 }
 LABELS_WAVELEN = {
@@ -51,6 +53,7 @@ PARTS_DEFAULT = {
     'wav': ('f', 'l', 's'),  # separate variable
     'sky': ('', 'cs', 'ce', 'cl'),  # separate variable
     'cld': ('',),  # instead use 'sky'
+    'cl': ('',),  # instead use 'sky'
 }
 PARTS_TESTING = {key: value[:2] for key, value in PARTS_DEFAULT.items()}
 PARAMS_DEFAULT = {
@@ -110,22 +113,33 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
     pathlabel : str
         The path label suitable for figures.
     """
-    sources = ('gis', 'had') if source is None else source  # pass False or () to skip
+    # Initial stuff
+    sources = ('gis', 'had') if source is None else source  # {{{
     sources = () if not sources else (source,) if isinstance(source, str) else sources
-    wavs = ('f', 's', 'l') if wav is None else wav  # pass False or () to skip
-    wavs = () if not wavs else (wav,) if isinstance(wav, str) else wavs
-    cld = 'cl' if cld is True else cld or ''
-    sky = 'ce' if sky is True else sky or ''
+    skies = 'ce' if sky is True else sky or ''
+    skies = (skies,) if isinstance(skies, str) else skies
+    clds = 'cl' if cld is True else cld or ''
+    clds = (clds,) if isinstance(clds, str) else clds
     sfc = 's' if sfc is True else sfc or 't'
-    rads = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)
-    temps = tuple(f'ts_{source}' for source in sources)
-    fluxes = tuple(f'{cld}_{part}' if cld else f'{part}{sky}' for part in rads)
-    cloudlabel = LABELS_CLOUD[cld or sky]  # cloud label
-    templabel = '-'.join(filter(None, ('ts', *sources)))
-    fluxlabel = '-'.join(filter(None, (*rads, cld or sky)))
-    pathlabel = '_'.join(filter(None, (templabel, fluxlabel)))
+    wavs = 'f' if len(skies) > 1 or len(clds) > 1 else ('f', 's', 'l')
+    wavs = wavs if wav is None else wav
+    wavs = () if not wavs else (wavs,) if isinstance(wavs, str) else wavs
+
+    # Generate variables and labels
+    temps = tuple(f'ts_{source}' for source in sources)  # {{{
+    names = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)
+    fluxes = tuple(
+        f'{cld}_{rad}' if cld else f'{rad}{sky}'
+        for cld, sky, rad in itertools.product(clds, skies, names)
+    )
     templabels = [LABELS_SOURCE[source] for source in sources]
-    fluxlabels = [' '.join(filter(None, (LABELS_WAVELEN[wav], cloudlabel))) for wav in wavs]  # noqa: E501
+    fluxlabels = [
+        ' '.join(filter(None, (LABELS_WAVELEN[wav], LABELS_CLOUD[cld or sky])))
+        for cld, sky, wav in itertools.product(clds, skies, wavs)
+    ]
+    pathtemps = '-'.join(filter(None, ('ts', *sources)))
+    pathfluxes = '-'.join(filter(None, (*names, *clds, *skies)))
+    pathlabel = '_'.join(filter(None, (pathtemps, pathfluxes)))
     return temps, fluxes, templabels, fluxlabels, pathlabel
 
 
@@ -150,16 +164,18 @@ def _parse_coords(time, translate=None, **kwargs):
     # NOTE: If e.g. have starting month 'jan' for CERES data running from 'mar' to
     # 'nov' then version label will still be e.g. '23yr' even though annual_filter()
     # restricts record to 22 years (i.e. full 12-month blocks). Keep for consistency.
-    month = time[0].dt.strftime('%b').item()
-    year0, year1 = time[0].dt.year.item(), time[-1].dt.year.item()
+    year0, year1 = time.dt.year.values[[0, -1]]  # {{{
+    month0 = time[0].dt.strftime('%b').item()
+    month = ('initial', month0.lower())
+    years = ('period', f'{year0}-{year1}')
     translate = {**TRANSLATE_PARAMS, **(translate or {})}
-    translate.setdefault(('month', None), ('initial', month.lower()))
-    translate.setdefault(('years', None), ('period', f'{year0}-{year1}'))
+    translate.setdefault(('month', None), month)
+    translate.setdefault(('years', None), years)  # }}}
     coords = {}
     for key, value in kwargs.items():
-        if key in ('pctile', 'correct'):  # concatenated by calc_feedback
-            continue
-        if (key, None) in translate:  # name translation
+        if key in ('pctile', 'correct'):  # {{{
+            continue  # concatenated by calc_feedback
+        if (key, None) in translate:
             name, _ = translate[key, None]
         else:  # e.g. 'source' and 'detrend'
             name = key
@@ -175,7 +191,7 @@ def _parse_coords(time, translate=None, **kwargs):
             value = f'{np.array(value).item()}yr'
         else:  # fallback version label
             value = '-'.join(map(str, np.atleast_1d(value).tolist()))
-        coords[name] = value
+        coords[name] = value  # }}}
     return coords
 
 
@@ -197,14 +213,13 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
     Returns
     -------
     params : dict
-        The vectorized keyword arguments `source`, `years`, `month`, `annual`,
-        `anomaly`, `detrend`, `correct` (translated into `version`).
+        Lists of `source`, `years`, `month`, `annual`, `anomaly`, `detrend`, `correct`.
     parts : dict
-        The vectorized keyword arguments `wav`, `sky`, and `cld`.
+        Lists of `wav`, `sky`, and `cld`.
     kwargs : dict
-        The additional keyword arguments.
+        Additional keyword arguments.
     """
-    names = kwargs.pop('name', None)
+    names = kwargs.pop('name', None)  # {{{
     skip_keys = (skip_keys,) if isinstance(skip_keys, str) else tuple(skip_keys or ())
     skip_values = (skip_values,) if isinstance(skip_values, str) else tuple(skip_values or ())  # noqa: E501
     if names is None:
@@ -250,9 +265,11 @@ def calc_feedback(
     annual : bool, optional
         Whether to use annual anomalies instead of monthly anomalies.
     detrend : bool or str, default: False
-        Whether to detrend the data. Use ``'x'`` for temperature and ``'y'`` for flux.
+        Whether to detrend the data. Should be combination of ``'xy'`` or ``'ij'``.
+    trends : bool, optional
+        Whether to use trends for the regressions instead of detrended data.
     verbose : bool or int, optional
-        Whether to print a message after detrending. ``1`` is ``R``, ``2`` is ``T``.
+        Whether to print a message after detrending the first estimate.
     source, wav, sky, cld, sfc : optional
         Passed to `_parse_names`.
     **kw_annual
@@ -262,11 +279,11 @@ def calc_feedback(
 
     Returns
     -------
-    lam, lam_lower, lam_upper : xarray.DataArray
+    lam, lam1, lam2 : xarray.DataArray
         The feedback estimate.
     dof : xarray.DataArray
         The degrees of freedom.
-    fit, fit_lower, fit_upper : xarray.DataArray
+    fit, fit1, fit2 : xarray.DataArray
         The regresson fit.
     """
     # Get the data arrays
@@ -276,13 +293,15 @@ def calc_feedback(
     # flux components e.g. 'rfnt' will be auto-derived from e.g. 'rsdt' 'rsut' 'rlut'.
     from coupled.process import get_result
     from coupled.specs import _pop_kwargs
-    kw_annual = _pop_kwargs(kwargs, annual_filter)
+    kw_annual = _pop_kwargs(kwargs, annual_filter)  # {{{
+    kw_detrend = kwargs.copy()
     kw_regress = kwargs.copy()
-    kw_detrend = {**kwargs, 'correct': False}
     kw_input = dict(source=source, wav=wav, sky=sky, cld=cld, sfc=sfc)
     kw_input = {key: value for key, value in kw_input.items() if value is not None}
     kw_parts = kw_input.copy()
-    nofit = kw_detrend.pop('nofit', False)  # remove from 'detrend'
+    idetrend = itrend = ()
+    if not verbose:  # avoid unnecessary computation
+        kw_detrend['correct'] = False
     for key, value in (('wav', 'f'), ('source', 'gis')):
         kw_parts.setdefault(key, value)
     if not np.isscalar(years):
@@ -296,15 +315,19 @@ def calc_feedback(
     else:  # user input values
         temp, flux = args
     if detrend in ('xy', 'yx') or detrend is True:
-        idxs = (0, 1)
+        idetrend = (0, 1)
     elif detrend == 'y':  # flux only
-        idxs = (1,)
+        idetrend = (1,)
     elif detrend == 'x':  # temp only
-        idxs = (0,)
-    elif not detrend:
-        idxs = ()
-    else:
-        raise ValueError(f'Invalid {detrend=}.')
+        idetrend = (0,)
+    elif detrend in ('ij', 'ji'):
+        itrend = (0, 1)
+    elif detrend == 'j':
+        itrend = (1,)
+    elif detrend == 'i':
+        itrend = (0,)
+    elif detrend:
+        raise ValueError(f"Invalid {detrend=}. Should be string of 'xy' or 'ij'.")
     temp = get_result(dataset, temp, time=None)  # forget time coordinates
     flux = get_result(dataset, flux, time=None)
 
@@ -315,42 +338,43 @@ def calc_feedback(
     # NOTE: Previously embedded annual stuff inside regress_dims so **kwargs would
     # do it twice but with bootstrapping need to ensure correct starting months are
     # selected or e.g. might select 19-year sample instead of 20-year sample.
-    mask = ~temp.isnull() & ~flux.isnull()
+    mask = ~temp.isnull() & ~flux.isnull()  # {{{
     temp, flux = temp[mask], flux[mask]
     func = annual_average if annual else annual_filter
     temp, flux = func(temp, **kw_annual), func(flux, **kw_annual)
-    coords = None  # fit coordinates
+    sample = None  # trend coordinates
     times = [0]  # regression index
     scale = 1 if annual else 12
     size = flux.size  # regression size
-    lams, lams_lower, lams_upper, dofs = [], [], [], []
-    fits, fits_lower, fits_upper = [], [], []
+    lams, lams1, lams2, dofs = [], [], [], []
+    fits, fits1, fits2 = [], [], []
     if years:
         size = 20 if years is True else years
-        coords = np.linspace(np.min(temp), np.max(temp), 100)
+        sample = np.linspace(np.min(temp), np.max(temp), 100)
         if size % 2:
             raise ValueError(f'Internal variability years {years} must be even.')
         size, step = size * scale, size * scale // 2
         times = np.arange(0, flux.size - size + scale, step)  # NOTE: see above
-    for time in times:
+    for time in times:  # regression index
         datas = []
         for idx, data in enumerate((temp, flux)):
             data = data[time:time + size]
-            if idx in idxs:  # note detrend
-                verb = True if verbose and time == times[0] else False
+            if idx in itrend or idx in idetrend:
+                verb = verbose and time is times[0]
                 data = detrend_dims(data, verbose=verb, **kw_detrend)
+                data = data.fit if idx in itrend else data
             datas.append(data)
-        result = regress_dims(*datas, coords=coords, **kw_regress)
-        lam, lam_lower, lam_upper, *_, dof = result
+        result = regress_dims(*datas, sample=sample, **kw_regress)
+        lam, lam1, lam2, *items, _, dof = result
         lams.append(lam)
-        lams_lower.append(lam_lower)
-        lams_upper.append(lam_upper)
+        lams1.append(lam1)
+        lams2.append(lam2)
         dofs.append(dof)
-        if not nofit:
-            _, _, _, fit, fit_lower, fit_upper, *_ = result
+        if items:  # fits returned
+            fit, fit1, fit2 = items
             fits.append(fit)
-            fits_lower.append(fit_lower)
-            fits_upper.append(fit_upper)
+            fits1.append(fit1)
+            fits2.append(fit2)
 
     # Combine results
     # NOTE: Use percentiles informed from standard deviation normal distribution
@@ -359,28 +383,28 @@ def calc_feedback(
     # points from full time series instead of contiguous segements.
     # TODO: Consider scipy stats-style model class objects that calculate
     # and return different products upon request (e.g. fits and percentiles).
-    kw_concat = dict(dim='sample', coords='minimal', compat='override')
+    kw_concat = dict(dim='sample', coords='minimal', compat='override')  # {{{
     if years:
         lam = xr.concat(lams, **kw_concat)
-        lam_lower = xr.concat(lams_lower, **kw_concat)
-        lam_upper = xr.concat(lams_upper, **kw_concat)
+        lam1 = xr.concat(lams1, **kw_concat)
+        lam2 = xr.concat(lams2, **kw_concat)
         dof = xr.concat(dofs, **kw_concat)
     lam_name = f'{flux.name}_lam'
     lam.name = lam_name
-    lam_lower.name = f'{lam_name}_lower'
-    lam_upper.name = f'{lam_name}_upper'
-    result = (lam, lam_lower, lam_upper, dof)
-    if not nofit:  # fit processing
+    lam1.name = f'{lam_name}1'
+    lam2.name = f'{lam_name}2'
+    result = (lam, lam1, lam2, dof)
+    if fits:  # process fit coordinates
         coords = dict(fits[0].coords)  # standardized dependent coordinates
         if years:
             fit = xr.concat(fits, **kw_concat).assign_coords(coords)
-            fit_lower = xr.concat(fits_lower, **kw_concat).assign_coords(coords)
-            fit_upper = xr.concat(fits_upper, **kw_concat).assign_coords(coords)
+            fit1 = xr.concat(fits1, **kw_concat).assign_coords(coords)
+            fit2 = xr.concat(fits2, **kw_concat).assign_coords(coords)
         fit_name = f'{flux.name}_fit'
         fit.name = fit_name
-        fit_lower.name = f'{fit_name}_lower'
-        fit_upper.name = f'{fit_name}_lower'
-        result = (*result, fit, fit_lower, fit_upper)
+        fit1.name = f'{fit_name}1'
+        fit2.name = f'{fit_name}1'
+        result = (*result, fit, fit1, fit2)
     return result
 
 
@@ -398,14 +422,10 @@ def process_spatial(dataset=None, output=None, **kwargs):
         Passed to `annual_filter` and `_feedbacks_from_fluxes`.
     """
     # Initial stuff
-    # NOTE: _feedbacks_from_fluxes() does not support toggling detrending on-off so
-    # instead detrend temperature below. Then feedbacks normalized by local T still
-    # capture 'internal' component and when _feedbacks_from_fluxes() takes global
-    # average the 'globe' region contains detrended global average. See jupyter
-    # notebook for comparison of average process_spatial() with process_scalar().
-    from cmip_data.feedbacks import _feedbacks_from_fluxes
-    from coupled.process import get_result
-    if dataset is None:  # load local observations
+    # NOTE: Here _feedbacks_from_fluxes() does not support detrending so instead apply
+    # detrending to input data. Then global averages of detrended process_spatial()
+    # results are identical to detrended process_scalar() (see jupyter notebook).
+    if dataset is None:  # {{{
         dataset = open_dataset(globe=False)
     if not isinstance(dataset, xr.Dataset):
         raise ValueError('Input argument must be a dataset.')
@@ -413,12 +433,17 @@ def process_spatial(dataset=None, output=None, **kwargs):
         raise TypeError('Invalid input arguments.')
     skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cl')
     params, parts, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
+
+    # Calculate feedback versions
+    # NOTE: Feedbacks normalized by local T still capture 'internal' component and when
+    # _feedbacks_from_fluxes() takes global average for 'globe' region, result is same
+    # as average of uncorrected T minus average of T trends i.e. same as scalar detrend
     results = []
     for values in itertools.product(*params.values()):
         # Create dataset and calculate climate feedbacks
         # NOTE: Retain flux trends since they do not affect least squares regression
         # estimate, only affect uncertainty. See jupyter notebook for examples.
-        kw = dict(zip(params, values))
+        kw = dict(zip(params, values))  # {{{
         style = 'annual' if kw['annual'] else 'monthly'
         remove = 'average' if kw['anomaly'] else 'climate'
         source = LONGS_SOURCE[kw['source']]
@@ -428,6 +453,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         result = dataset.rename({f'ts_{source[:3]}': 'ts'})
         result['ts'] = detrend_dims(result.ts)  # detrend temperature (see above)
         for values in itertools.product(*parts.values()):
+            from coupled.process import get_result
             items = dict(zip(parts, values))
             cld, wav, sky = items['cld'], items['wav'], items['sky']
             cld, sky = (sky, '') if sky == 'cl' else (cld, sky)
@@ -435,32 +461,33 @@ def process_spatial(dataset=None, output=None, **kwargs):
             result[name] = get_result(result, name, time=None)
         names = [name for name in result.data_vars if name[:3] == 'ts_']
         names += ['rlut', 'rlutcs', 'rsut', 'rsutcs', 'rsdt']
-        names += ['x', 'y', 'fit', 'fit_lower', 'fit_upper']
-        result = result.drop_vars(names)  # e.g. other source or 'lower' and 'upper'
+        names += ['x', 'y', 'fit', 'fit1', 'fit2']
+        result = result.drop_vars(names)  # }}}
 
         # Save feedback data
         # Facets: ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')
         # Version: ('gis|had', 'monthly|annual', 'region', year1, year2)
-        if output is False:
-            continue
-        start = dataset.time[0].dt.year.item()
-        stop = dataset.time[-1].dt.year.item()
-        head = 'feedbacks_Amon_CERES_historical_flagship'
-        tail = f'{start:04d}-{stop:04d}-{source}-{style}-{remove}.nc'
-        base = Path('~/data/ceres-feedbacks').expanduser()
-        file = '_'.join((head, tail))
-        if isinstance(output, Path) or '/' in (output or ''):  # copy to general.py
-            base = Path(output).expanduser()
-        elif output is not None:  # copy to general.py
-            file = output
-        if not base.is_dir():
-            os.mkdir(base)
-        if not base.is_dir():
-            raise ValueError(f'Invalid output location {base}.')
-        result = _feedbacks_from_fluxes(result, **kw_fluxes)
-        print(f'Saving file: {file}')
-        result.to_netcdf(base / file)
+        if output is not False:  # {{{
+            start = dataset.time[0].dt.year.item()
+            stop = dataset.time[-1].dt.year.item()
+            head = 'feedbacks_Amon_CERES_historical_flagship'
+            tail = f'{start:04d}-{stop:04d}-{source}-{style}-{remove}.nc'
+            base = Path('~/data/ceres-feedbacks').expanduser()
+            file = '_'.join((head, tail))
+            if isinstance(output, Path) or '/' in (output or ''):  # copy to general.py
+                base = Path(output).expanduser()
+            elif output is not None:  # copy to general.py
+                file = output
+            if not base.is_dir():
+                os.mkdir(base)
+            if not base.is_dir():
+                raise ValueError(f'Invalid output location {base}.')
+            from cmip_data.feedbacks import _feedbacks_from_fluxes
+            result = _feedbacks_from_fluxes(result, **kw_fluxes)
+            print(f'Saving file: {file}')
+            result.to_netcdf(base / file)  # }}}
         results.append(result)
+
     return results
 
 
@@ -480,7 +507,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     # Create dataset and calculate feedbacks
     # NOTE: Unlike 'coupled' feedback calculations this has coordinates for several
     # variant calculations. In future should allow this for non-scalar estimates.
-    if dataset is None:  # load global average observations
+    if dataset is None:  # {{{
         dataset = open_dataset(globe=True)
     if not isinstance(dataset, xr.Dataset):
         raise ValueError('Input argument must be a dataset.')
@@ -545,7 +572,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     # Concatenate and save data
     # NOTE: Here calc_feedack() returns array with 'correct' coordinate for speed, then
     # combine ('source', 'period', 'initial', 'style', 'remove', 'detrend', 'correct').
-    if not results:
+    if not results:  # {{{
         raise RuntimeError('No datasets created.')
     result = xr.concat(
         results.values(),

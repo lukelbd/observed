@@ -10,26 +10,34 @@ from cmip_data import assign_dates
 from .satellite import load_ceres
 from .surface import load_gistemp, load_hadcrut
 
-__all__ = ['open_dataset', 'open_shared']
+__all__ = ['open_dataset', 'open_external']
 
 
-def _parse_path(option, folder, file):
+def _parse_path(path, folder, file, exists=False):
     """
-    Parse the input path.
+    Parse the user input path.
 
     Parameters
     ----------
-    option : path-like
-        The user input.
+    path : path-like
+        The input path.
     folder : str
         The default folder.
     file : str
-        The default file.
+        The default file name.
+    exists : bool, optional
+        The path suffixes or whether to ensure exists.
     """
-    if isinstance(option, Path):  # TODO: copy for open_dataset()
-        path = folder / option if option.is_dir() else option
-    else:
-        path = Path(folder).expanduser() / (option or file)
+    if isinstance(path, Path) and path.is_dir() or path and '/' in path:
+        folder = path
+    elif path:
+        file = path
+    folder = Path(folder or '')
+    path = folder.expanduser() / file
+    if exists and not path.is_file():
+        raise ValueError(f'Path {str(path)!r} does not exist.')
+    if exists and isinstance(exists, tuple) and path.suffix not in exists:
+        raise NotImplementedError
     return path
 
 
@@ -50,18 +58,20 @@ def open_dataset(
     average : bool, optional
         Whether to load global data.
     """
-    ceres = load_ceres(base, ceres, clim=ceres0, average=average)
+    # NOTE: This is used to create observational feedback estimates with
+    # feedbacks.py scalar_feedbacks(). Should improve to support other variables.
+    ceres = load_ceres(ceres, ceres0, average=average)
     slice_ = slice(ceres.time.values[0], ceres.time.values[-1])
     rename = dict(ts='ts_gis')  # rename single variable
-    gistemp = load_gistemp(base, gistemp, average=average, time=slice_)
+    gistemp = load_gistemp(gistemp, average=average, time=slice_)
     gistemp = gistemp.rename(rename)
     rename = dict(ts='ts_had', ts_lower='ts_had_lower', ts_upper='ts_had_upper')
-    hadcrut = load_hadcrut(base, hadcrut, average=average, time=slice_)
+    hadcrut = load_hadcrut(hadcrut, average=average, time=slice_)
     hadcrut = hadcrut.rename(rename if average else dict(ts='ts_had'))
     datasets = {'ceres': ceres, 'gistemp': gistemp, 'hadcrut': hadcrut}  # noqa: E501
     if average:  # He et al. shared data
         rename = dict(ts='ts_he')  # preserve cloud names
-        shared = open_shared(base, time=slice_)
+        shared = open_external(base, time=slice_)
         datasets['shared'] = shared.rename(rename)
     sizes = {
         src: 'x'.join(str(data.sizes.get(key, 1)) for key in ('lon', 'lat'))
@@ -75,7 +85,7 @@ def open_dataset(
     return dataset
 
 
-def open_shared(base=None, ceres=None, gistemp=None, **kwargs):
+def open_external(ceres=None, gistemp=None, **kwargs):
     """
     Return external cloud response and surface temperature data from He et al.
 
@@ -90,11 +100,9 @@ def open_shared(base=None, ceres=None, gistemp=None, **kwargs):
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
-    # NOTE: Reproduce He et al. results by skipping detrending when computing
-    # feedbacks. Otherwise uncertainty much higher.
-    # TODO: Here use decode_coords='all' to bypass 'time_bnds' variable that
+    # NOTE: Here use decode_coords='all' to bypass 'time_bnds' variable that
     # otherwise prohibits xr.open_dataarray(). Should use this elsewhere.
-    folder = base or '~/data/ceres'
+    folder = '~/data/ceres'
     file = 'He_CERES_TOA-cloud_200101-201912_global-anom.nc'
     path = _parse_path(ceres, folder, file)
     flux = xr.open_dataset(path, use_cftime=True)
@@ -105,7 +113,7 @@ def open_shared(base=None, ceres=None, gistemp=None, **kwargs):
         part = 'hi' if 'high' in name else 'lo' if 'low' in name else 'mx' if 'mixed' in name else ''  # noqa: E501
         rad = 'rlnt' if 'LW' in name else 'rsnt' if 'SW' in name else 'rfnt'
         flux = flux.rename({name: f'{cloud}{part}_{rad}'.strip('_')})
-    folder = base or '~/data/gistemp4'
+    folder = '~/data/gistemp4'
     file = 'He_gistemp1200_GHCNv4_ERSSTv5_200101-201912_global-anom.nc'
     path = _parse_path(gistemp, folder, file)
     temp = xr.open_dataarray(path, use_cftime=True, decode_coords='all')
@@ -113,27 +121,3 @@ def open_shared(base=None, ceres=None, gistemp=None, **kwargs):
     temp.name = 'ts'  # change from 'tempanomaly'
     data = xr.merge((temp, flux))  # note both are from 2001 to 2019
     return data.sel(**kwargs)
-
-
-def open_regressions(indices, stations):
-    """
-    Load regression slopes for various stations and climate indices.
-
-    Parameters
-    ----------
-    *indices, *stations
-        The climate indices and stations to combine.
-    """
-    indices, stations
-
-
-def save_regressions(indices, stations):
-    """
-    Save individual regression results for a given station and climate index.
-
-    Parameters
-    ----------
-    *indices, *stations
-        The climate indices and stations to write.
-    """
-    indices, stations

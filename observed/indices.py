@@ -15,12 +15,12 @@ __all__ = ['load_index', 'load_indices']
 
 
 # Data source links
-# Note: Processes versions of indices e.g. 'ONI' (3-month running mean ERSST5 Nino 3.4
+# NOTE: Processes versions of indices e.g. 'ONI' (3-month running mean ERSST5 Nino 3.4
 # used operationally by NOAA) or 'centered ENSO' (and 10-year low-pass-filter but
 # instead support this in regression functions. Use climopy lagged regression and
 # spectral filtering tools and subtract monthly 1981-2010 or 1991-2020 climatologies
 # or even cliamte drift-corrected climatologies to get proper index anomalies.
-# Note: Raw data is from CPC and CRU while PSL provides links and irregularly-updated
+# NOTE: Raw data is from CPC and CRU while PSL provides links and irregularly-updated
 # copies. Exceptions are regularly-updated HadISST ENSO indices, not available from CRU
 # site, and regularly-updated CPC/ERSST NAO indices, not available from CPC site. Also
 # NCAR page mostly links to externally hosted data but provides custom HadISST based
@@ -28,22 +28,33 @@ __all__ = ['load_index', 'load_indices']
 # from CRU and PSL so skip). Note the PSL 'gcos_wgsp' page has both PSL/CRU-derived
 # HadISST indices while 'climateindices' has CPC-derived ERSST indices (but for AMO
 # ERSST data have to go to general web page which points to NCDC source -- the default
-# data is Kaplan SST and OISST). Finally NCEI seems to direct to same pages as NCEI.
+# data is Kaplan SST and OISST). Finally NCEI seems to direct to same pages as CPC.
+# See: https://psl.noaa.gov/data/climateindices/list/
 # See: https://www.cpc.ncep.noaa.gov/data/indices/
 # See: https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_ao_index/teleconnections.shtml  # noqa: E501
 # See: https://www1.ncdc.noaa.gov/pub/data/cmb/ersst/v5/index/
 # See: https://crudata.uea.ac.uk/cru/data/pci.htm
-# See: https://psl.noaa.gov/data/climateindices/list/
 # See: https://psl.noaa.gov/data/timeseries/AMO/
 # See: https://psl.noaa.gov/gcos_wgsp/Timeseries/
+# See: https://psl.noaa.gov/people/cathy.smith/best/
+# See: https://psl.noaa.gov/enso/mei/
 # See: https://climatedataguide.ucar.edu/climate-data/overview-climate-indices
-INDEX_CODES = {'ao': 'nam', 'aao': 'sam', 'nino34': 'nino', 'nino3.4': 'nino'}
+INDEX_CODES = {
+    'ao': 'nam',
+    'aao': 'sam',
+    'bei': 'best',
+    'mei': 'enso',
+    'nino34': 'nino',
+    'nino3.4': 'nino',
+}
 INDEX_FILES = {
     'nino': ('ersst5.nino.mth.91-20.ascii.txt', 'nino34.long.anom.data.txt'),  # CPC ERSST vs. JPL HadSST  # noqa: E501
     'soi': ('soi.data.txt', 'soi.dat.txt'),  # JPL/CPC source vs. CRU source
     'pdo': ('ersst.v5.pdo.dat.txt', 'PDO.latest.txt'),  # CPC ERSST vs. JISAO HadSST/OISST  # noqa: E501
     'amo': ('ersst.v5.amo.dat.txt', 'amo_monthly.txt'),  # CPC ERSST vs. NCAR HadSST
     'nao': ('nao.data.txt', 'nao.dat.txt'),  # JPL/CPC source vs. CRU source
+    'enso': 'meiv2.data.txt',  # PSL multivariate ENSO index (1979 to present)
+    'best': 'enso.ts.1mn.txt',  # PSL bivariate ENSO index (1950 to present)
     'nam': 'monthly.ao.index.b50.current.ascii.table.txt',
     'sam': 'monthly.aao.index.b79.current.ascii.table.txt',
     'qbo': 'qbo.data.txt',
@@ -54,6 +65,8 @@ INDEX_LABELS = {
     'pdo': 'Pacific Decadal Oscillation',
     'amo': 'Atlantic Multidecadal Oscillation',
     'nao': 'North Atlantic Oscillation',
+    'enso': 'Bivariate ENSO Index',
+    'mei': 'Multivariate ENSO Index',
     'nam': 'Northern Annular Mode',  # or Arctic Oscillation
     'sam': 'Southern Annular Mode',  # or Antarctic Oscillation
     'qbo': 'Quasi-Biennial Oscillation',
@@ -124,6 +137,12 @@ def load_index(index, base=None, cru=False):
     elif code in ('nao', 'soi'):
         skiprows, usecols = 1, range(13)  # shared
         skipfooter = 0 if cru else 3
+    elif code == 'enso':
+        skiprows, header, usecols = None, None, tuple(range(13))
+        skipfooter = 0  # TODO: update
+    elif code == 'best':
+        skiprows, header = (1, None)
+        skipfooter = 3
     elif code == 'amo':
         skiprows, header = (1, None) if cru else (1, 0)
         index_col = 0 if cru else (0, 1)
@@ -144,7 +163,7 @@ def load_index(index, base=None, cru=False):
     # so critical to reduce 'infer_nrows' from default of 100 for shorter datasets.
     options = INDEX_FILES[code]
     options = (options,) if isinstance(options, str) else options
-    nulls = (99.9, 99.99, 999, 999.9)
+    nulls = (9.99, 99.9, 99.99, 999, 999.9)
     if cru and len(options) == 1:
         raise ValueError(f'CRU version unavailable for climate index {code!r}.')
     file = options[int(bool(cru))]

@@ -13,7 +13,7 @@ import pandas as pd
 import xarray as xr
 from climopy import var, ureg, vreg  # noqa: F401
 
-from .datasets import load_dataset
+from .datasets import open_dataset
 from .arrays import annual_average, annual_filter, detrend_dims, regress_dims
 
 __all__ = ['calc_feedback', 'process_spatial', 'process_scalar']
@@ -35,7 +35,7 @@ LABELS_WAVELEN = {
 
 # Temperature source labels
 LABELS_SOURCE = {
-    'he': 'He et al.',
+    'he': 'GISTEMP4',
     'gis': 'GISTEMP4',
     'had': 'HadCRUT5',
 }
@@ -49,7 +49,7 @@ LONGS_SOURCE = {
 # Feedback default arguments
 PARTS_DEFAULT = {
     'wav': ('f', 'l', 's'),  # separate variable
-    'sky': ('', 'cs', 'ce', 'cld'),  # separate variable
+    'sky': ('', 'cs', 'ce', 'cl'),  # separate variable
     'cld': ('',),  # instead use 'sky'
 }
 PARTS_TESTING = {key: value[:2] for key, value in PARTS_DEFAULT.items()}
@@ -64,7 +64,7 @@ PARAMS_DEFAULT = {
 }
 PARAMS_TESTING = {key: value[:2] for key, value in PARAMS_DEFAULT.items()}
 
-# Parameter coordinate translations
+# Parameter coordinate translatons
 TRANSLATE_PARAMS = {
     ('annual', None): ('style', 'monthly'),
     ('annual', False): ('style', 'monthly'),
@@ -114,17 +114,18 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
     sources = () if not sources else (source,) if isinstance(source, str) else sources
     wavs = ('f', 's', 'l') if wav is None else wav  # pass False or () to skip
     wavs = () if not wavs else (wav,) if isinstance(wav, str) else wavs
-    cld = 'cld' if cld is True else cld
-    sky = '' if sky is None else sky
-    sfc = 't' if sfc is None else sfc
+    cld = 'cl' if cld is True else cld or ''
+    sky = 'ce' if sky is True else sky or ''
+    sfc = 's' if sfc is True else sfc or 't'
+    rads = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)
     temps = tuple(f'ts_{source}' for source in sources)
-    names = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)  # noqa: E501
-    fluxes = tuple(f'{cld}_{part}' if cld else f'{part}{sky}' for part in names)
-    prefix = 'ts-' + '-'.join(sources)
-    suffix = cld if cld is not None else sky
+    fluxes = tuple(f'{cld}_{part}' if cld else f'{part}{sky}' for part in rads)
+    cloudlabel = LABELS_CLOUD[cld or sky]  # cloud label
+    templabel = '-'.join(filter(None, ('ts', *sources)))
+    fluxlabel = '-'.join(filter(None, (*rads, cld or sky)))
+    pathlabel = '_'.join(filter(None, (templabel, fluxlabel)))
     templabels = [LABELS_SOURCE[source] for source in sources]
-    fluxlabels = [f'{LABELS_WAVELEN[wav]}' for wav in wavs]
-    pathlabel = '_'.join(filter(None, (prefix, '-'.join(names), suffix)))
+    fluxlabels = [' '.join(filter(None, (LABELS_WAVELEN[wav], cloudlabel))) for wav in wavs]  # noqa: E501
     return temps, fluxes, templabels, fluxlabels, pathlabel
 
 
@@ -261,9 +262,11 @@ def calc_feedback(
     Returns
     -------
     lam, lam_lower, lam_upper : xarray.DataArray
-        The feedbacks for the input settings.
+        The feedback estimate.
+    dof : xarray.DataArray
+        The degrees of freedom.
     fit, fit_lower, fit_upper : xarray.DataArray
-        The Gregory regresson fit for the input settings.
+        The regresson fit.
     """
     # Get the data arrays
     # NOTE: Here 'years' is used to both specify period size when bootstrapping control
@@ -292,10 +295,10 @@ def calc_feedback(
     else:  # user input values
         temp, flux = args
     if detrend in ('xy', 'yx') or detrend is True:
-        idxs = (1, 0)
-    elif detrend == 'x':  # temp only
-        idxs = (1,)
+        idxs = (0, 1)
     elif detrend == 'y':  # flux only
+        idxs = (1,)
+    elif detrend == 'x':  # temp only
         idxs = (0,)
     elif not detrend:
         idxs = ()
@@ -387,7 +390,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
     Parameters
     ----------
     dataset : xarray.Dataset, optional
-        The input dataset. Default is ``load_dataset(globe=True)``.
+        The input dataset. Default is ``open_dataset(globe=True)``.
     output : path-like, optional
         The output directory or name. If ``False`` nothing is saved.
     **kwargs
@@ -402,12 +405,12 @@ def process_spatial(dataset=None, output=None, **kwargs):
     from cmip_data.feedbacks import _feedbacks_from_fluxes
     from coupled.process import get_result
     if dataset is None:  # load local observations
-        dataset = load_dataset(globe=False)
+        dataset = open_dataset(globe=False)
     if not isinstance(dataset, xr.Dataset):
         raise ValueError('Input argument must be a dataset.')
     if 'correct' in kwargs or 'pctile' in kwargs:
         raise TypeError('Invalid input arguments.')
-    skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cld')
+    skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cl')
     params, parts, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
     results = []
     for values in itertools.product(*params.values()):
@@ -426,7 +429,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         for values in itertools.product(*parts.values()):
             items = dict(zip(parts, values))
             cld, wav, sky = items['cld'], items['wav'], items['sky']
-            cld, sky = (sky, '') if sky == 'cld' else (cld, sky)
+            cld, sky = (sky, '') if sky == 'cl' else (cld, sky)
             name = f'{cld}_r{wav}nt{sky}'.strip('_')
             result[name] = get_result(result, name, time=None)
         names = [name for name in result.data_vars if name[:3] == 'ts_']
@@ -467,7 +470,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     Parameters
     ----------
     dataset : xarray.Dataset, optional
-        The input dataset. Default is ``load_dataset(globe=False)``.
+        The input dataset. Default is ``open_dataset(globe=False)``.
     output : bool or path-like, optional
         The output directory or name. If ``False`` nothing is saved.
     **kwargs
@@ -477,7 +480,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     # NOTE: Unlike 'coupled' feedback calculations this has coordinates for several
     # variant calculations. In future should allow this for non-scalar estimates.
     if dataset is None:  # load global average observations
-        dataset = load_dataset(globe=True)
+        dataset = open_dataset(globe=True)
     if not isinstance(dataset, xr.Dataset):
         raise ValueError('Input argument must be a dataset.')
     if output is False:  # begin printing
@@ -485,6 +488,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     else:  # print message
         print('Calculating global climate feedbacks.')
     testing = kwargs.get('testing', False)
+    suffix = kwargs.get('source', '')
     params, parts, kwargs = _parse_kwargs(**kwargs)
     translate = kwargs.pop('translate', None)
     results = {}
@@ -511,7 +515,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
                 name, cld, wav, sky = values[0], '', '', ''
             else:  # _parse_kwargs handles incompatibilities
                 name, cld, wav, sky = '', *(opts[key] for key in ('cld', 'wav', 'sky'))
-            if sky == 'cld':  # workaround
+            if sky in ('cl', 'cld'):  # workaround
                 cld, sky = sky, ''
             temp = f'ts_{source[:3]}'.strip('_')
             flux = name or f'{cld}_r{wav}nt{sky}'.strip('_')
@@ -567,8 +571,9 @@ def process_scalar(dataset=None, output=None, **kwargs):
     if output is False:  # end printing
         print(')', end=' ')
     else:  # save result
+        suffix = suffix and f'-{suffix}'
         base = Path('~/data/global-feedbacks').expanduser()
-        file = 'tmp.nc' if testing else 'feedbacks_CERES_global.nc'
+        file = 'tmp.nc' if testing else f'feedbacks_CERES_global{suffix}.nc'
         if isinstance(output, str) and '/' not in output:
             output = base / output
         elif output:

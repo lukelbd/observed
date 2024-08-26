@@ -32,16 +32,16 @@ def load_ceres(base=None, file=None, clim=None, average=True, anomaly=True, **kw
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
-    # NOTE: Standardized data produced in 'process.py' standardize_grid().
+    # NOTE: Standardized data produced in 'arrays.py' standardize_dims().
     # NOTE: Full 23 year data uses only TERRA from 2000-2003, TERRA + AQUA from
     # 2003-2019, and NOAA20 afterwards. Product includes bias and drift corrections
     # to prevent discontinuity when satellites change (however could try to detect).
     base = Path(base or '~/data/ceres').expanduser()
     if average:
-        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202312_global.nc'
+        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202401_global.nc'
         clim = clim or 'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_global.nc'
     else:
-        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202312_standardized.nc'
+        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202401_standardized.nc'
         clim = clim or 'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_standardized.nc'
     paths = (clim, file) if anomaly else (file,)
     datas = []

@@ -5,10 +5,13 @@ Shared utilities for working with observational data.
 # Internal stuff
 from functools import partial
 from warnings import warn
-from icecream import ic, colorize
-ic.configureOutput(outputFunction=lambda *args: print(colorize(*args)))
+from icecream import ic, colorize, pprint
 _ObservedWarning = type('ObservedWarning', (UserWarning,), {})
 _warn_observed = partial(warn, category=_ObservedWarning, stacklevel=2)
+ic.configureOutput(
+    outputFunction=lambda *args: print(colorize(*args)),
+    argToStringFunction=lambda x: pprint.pformat(x, sort_dicts=False),
+)
 
 # Import tools
 from climopy import ureg, vreg, const  # noqa: F401

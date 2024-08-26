@@ -90,7 +90,7 @@ def _parse_columns(columns):
                 name2 = f'{name1[:-1]} mean'
         else:
             for part, replace in (  # simple translations
-                ('atmospheric', 'atmosphere'),
+                ('atmospheric', 'atmos'),
                 ('capita', 'per_capita'),
                 ('land_use', 'land-use'),
                 ('fossil.', 'total'),  # standardize
@@ -118,7 +118,7 @@ def _parse_columns(columns):
     return index, units
 
 
-def load_budgets(*sheets, **kwargs):
+def load_budgets(*sheets, year=None, **kwargs):
     """
     Load and combine annual carbon budget spreadsheets.
 
@@ -126,6 +126,8 @@ def load_budgets(*sheets, **kwargs):
     ----------
     *sheets : str or int, optional
         The sheet name(s) or number(s). Defaults to all.
+    year : int, optional
+        The carbon budget year.
     **kwargs
         Passed to `load_budget`.
 
@@ -139,6 +141,8 @@ def load_budgets(*sheets, **kwargs):
     # this into the pulse response least squares minimization function.
     sheets = sheets or list(SHEET_PAGES)
     sheets = [SHEET_NAMES.get(sheet, sheet) for sheet in sheets]
+    if year == 2023:
+        sheets = ['historical']
     if any(sheet not in SHEET_PAGES for sheet in sheets):
         raise ValueError(f'Invalid sheet name(s): {sheets!r}')
     if 'recent' in sheets and 'historical' in sheets:
@@ -192,32 +196,34 @@ def load_budget(sheet=None, base=None, year=None):
     # NOTE: Using data.columns.levels shows unique level values, but may be unsorted,
     # so use get_level_values() to retrieve unit indicator in upper left. Note land
     # use spreadsheet includes headers with extra info on same line that we drop.
-    year = year or 2022
-    file = f'Global_Carbon_Budget_{year}v1.0.xlsx'
+    year = year or 2022  # only 2022 has all sheets
+    version = 1.1 if year == 2023 else 1.0
+    file = f'Global_Carbon_Budget_{year}v{version}.xlsx'
     base = Path(base or '~/data/carbon-budget').expanduser()
     path = base / file
     sheet = sheet or 1  # global budget
-    sheet = SHEET_PAGES.get(sheet, sheet)
-    if isinstance(sheet, str):
+    page = SHEET_PAGES.get(sheet, sheet)
+    if isinstance(page, str):
         options = ', '.join(map(repr, SHEET_PAGES))
         raise ValueError(f'Unknown sheet {sheet!r}. Options are: {options}.')
-    name = SHEET_NAMES.get(sheet, sheet)
+    name = SHEET_NAMES.get(page, page)
     label = SHEET_LABELS[name]
-    start = SHEET_STARTS[sheet]
-    land_use = sheet == 4
+    start = SHEET_STARTS[page]
+    land_use = page == 4
     header = range(start - 1, start + 1 + land_use)  # three headers for land-use
+    page = 1 if year == 2023 else page  # overwrite
     data = pd.read_excel(
         path,
         header=tuple(header),
         index_col=0,  # all have same index
-        sheet_name=sheet,  # sheet number
+        sheet_name=page,  # sheet number
     )
     data = data.dropna(axis=1, how='all')  # empty divider columns
     data.index.name = 'year'  # lower-case and assign if missing
     index, units = _parse_columns(data.columns)
     data.columns = index  # include units index level in future
-    if 'atmosphere' in index:
-        names = ['atmosphere']  # enforce standard order
+    if 'atmos' in index:
+        names = ['atmos']  # enforce standard order
         names.extend(name for name in SHEET_PAGES if name in index)
         names.extend(name for name in index if name not in names)
         data = data[names]  # enforce standard column order

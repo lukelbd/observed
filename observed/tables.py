@@ -5,17 +5,20 @@ Processing utilities for pandas tables.
 # TODO: Merge with 'arrays.py' and support arbitrary input types. Should leverage
 # public facing abstract-array climopy wrappers.
 from datetime import datetime
-import re
 
+import climopy as climo
 import numpy as np
 import pandas as pd
-from climopy import const, ureg, vreg  # noqa: F401
+from climopy import const, unit, ureg, vreg  # noqa: F401
 from climopy import var
 from icecream import ic  # noqa: F401
+
+from .arrays import regress_dims
 
 __all__ = [
     'to_datetime',
     'to_monthly',
+    'get_change',
     'get_growth',
     'restrict_time',
     'detrend_time',
@@ -55,7 +58,7 @@ def to_datetime(data):
     if hasattr(data.index, 'year'):
         index = data.index.copy()
     else:
-        index = data.index.map(lambda year: np.datetime64(f'{year:04d}-01-01'))
+        index = data.index.map(lambda year: np.datetime64(f'{year:04.0f}-01-01'))
     result = data.copy()
     result.index = index
     result.index.name = 'time'
@@ -112,6 +115,56 @@ def to_monthly(data):
     return result
 
 
+def get_change(data, years=None):
+    """
+    Get the rate of change in the growth rate.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame or xarray.DataArray
+        The input growth rate.
+    years : 2-tuple of int, optional
+        The years used to sample the growth rate.
+
+    Returns
+    -------
+    slope : float
+        The growth rate change calculated with either method.
+    delta : float
+        The growth rate change calculated with differences
+    base : float
+        The average growth rate over the base period.
+    sigma : float
+        The standad error of the change estimator.
+    dof : float
+        The reduced degrees of freedom for the regression.
+    """
+    # TODO: Finish this and also convert histogram plotting and pulse response code
+    # to support arbitrary-dimensional input forcing arrays.
+    units = getattr(data, 'units', ureg.PgC / ureg.yr)
+    data = getattr(data, 'magnitude', data)
+    iunits = climo.decode_units(str(units)) / ureg.decade  # custom decade unit
+    years = np.atleast_1d(years or (None, None))
+    years = (years.item(), 2023) if years.size == 1 else tuple(years)
+    if isinstance(data, (pd.DataFrame, pd.Series)):
+        dim, data = data.index.name, data.loc[slice(*years)].to_xarray()
+    else:
+        dim, data = 'year', data.climo.dequantify().sel(year=slice(*years))
+    data.attrs.setdefault('units', unit.encode_units(units))
+    data.coords[dim].attrs.setdefault('units', 'year')
+    data = data.climo.quantify()
+    coord = data.climo.coords.get(dim, quantify=True)
+    kw_dims = dict(dim=dim, correct='r', manual=dim != 'time')
+    slope, slope1, slope2, *_, dof = regress_dims(coord, data, **kw_dims)
+    slope, slope1, slope2 = (_.climo.quantify() for _ in (slope, slope1, slope2))
+    slope = slope.item().to(iunits)
+    sigma = 0.5 * (slope2 - slope1).item().to(iunits)
+    delta = data.diff(dim).mean() / coord.diff(dim).mean()
+    delta = delta.item().to(iunits)
+    base = data.mean(dim).item().to(units)
+    return slope, delta, base, sigma, dof.item()
+
+
 def get_growth(data, delta=False):
     """
     Translate annual or monthly concentration to growth rates.
@@ -127,8 +180,6 @@ def get_growth(data, delta=False):
     -------
     result : pandas.DataFrame
         The calculated growth rates.
-    trend : pandas.DataFrame
-        The best fit to the growth rates.
     """
     # NOTE: ESRL 'gr' data shows growth over the year shown on index (i.e. DJ average
     # minus DJ average), and this similarly gives growth rates for centers of months
@@ -137,8 +188,8 @@ def get_growth(data, delta=False):
     units = getattr(data, 'units', ureg.ppm)
     data = getattr(data, 'magnitude', data)
     data = to_monthly(restrict_time(data))
-    if units.is_compatible_with('GtC / yr'):
-        return ureg.Quantity(data, units).to('GtC / yr')
+    if units.is_compatible_with('PgC / yr'):
+        return ureg.Quantity(data, units).to('PgC / yr')
     if not units.is_compatible_with('ppm'):
         raise ValueError(f'Invalid input units {units!r}.')
     days = data.index.days_in_month.values
@@ -164,7 +215,7 @@ def get_growth(data, delta=False):
     result = pd.DataFrame(results)
     result = ureg.Quantity(result, units)
     result = result * MOLAR_TO_MASS / ureg.days  # WARNING: must come after Quantity
-    result = result.to('GtC / yr')
+    result = result.to('PgC / yr')
     return result
 
 
@@ -177,7 +228,7 @@ def detrend_time(data, base=None):
     data : pandas.DataFrame
         The input growth rates.
     base : pandas.DataFrame, optional
-        The baseline concentration or emissions to subtract from the series.
+        The baseline emissions to subtract from the series.
 
     Parameters
     ----------
@@ -190,10 +241,13 @@ def detrend_time(data, base=None):
     data = getattr(data, 'magnitude', data)
     data = restrict_time(data)  # fill nulls before interpolation
     if base is None:
-        days = data.index.days_in_month.values
-        days = np.append(0, np.cumsum(days))
-        days = 0.5 * (days[1:] + days[:-1])  # central month
-        *_, trend, _, _ = var.linefit(days, data.values, axis=0, correct=False)
+        if not isinstance(data.index, pd.DatetimeIndex):
+            time = data.index.values
+        else:  # central month
+            time = data.index.days_in_month.values
+            time = np.append(0, np.cumsum(time))
+            time = 0.5 * (time[1:] + time[:-1])
+        *_, trend, _, _ = var.linefit(time, data.values, axis=0, adjust=False)
         if isinstance(data, pd.Series):
             trend = pd.Series(trend, index=data.index, name=data.name)
         elif isinstance(data, pd.DataFrame):
@@ -219,7 +273,7 @@ def detrend_time(data, base=None):
     return result, trend
 
 
-def reduce_time(data, time=None, lag=None, trunc=None):
+def reduce_time(data, time=None, lag=None, cut=None):
     """
     Reduce over time index using monthly selection or seasonal or annual averages.
 
@@ -231,8 +285,8 @@ def reduce_time(data, time=None, lag=None, trunc=None):
         The month or season or time frequency indicator.
     lag : int, optional
         The number of months to lag the data.
-    trunc : int, optional
-        The number of months to optionally truncate. If ``True`` truncate to one point.
+    cut : int, optional
+        The number of months to optionally cut. If ``True`` include only one month.
 
     Returns
     -------
@@ -289,10 +343,10 @@ def reduce_time(data, time=None, lag=None, trunc=None):
         label = name = SEASON_MONTHS[months.min() - 1:months.max()]
     elif date := datetime(1800, months.item(), 1):  # single month
         label, name = date.strftime('%B'), date.strftime('%b').lower()
-    if trunc is True:  # e.g. DJF --> J, NDJF --> DJ
+    if cut is True:  # e.g. DJF --> J, NDJF --> DJ
         months = months[imax // 2:imax // 2 + 1 + (imax % 2)]
     else:  # truncate by input
-        months = months[trunc:trunc and -trunc or None]
+        months = months[cut:cut and -cut or None]
     loc0 = [t for t, time in enumerate(data.index) if time.month == months[0]]
     loc1 = [t for t, time in enumerate(data.index) if time.month == months[-1]]
     data = data.iloc[loc0[0]:loc1[-1] + 1]  # omit incomplete seasons
@@ -354,24 +408,32 @@ def select_time(data, years=None):
     result : pandas.DataFrame
         The restricted output data.
     """
+    # TODO: Delete this? Should jjuse use 'sel' and 'isel' instead maybe.
     # NOTE: This should come after reduce_time(). Will use january for the datetime
     # index of 'winter' averages e.g. 'DJF' or 'NDJF' so no special handling needed.
     index = data.index
     units = getattr(data, 'units', None)
     data = getattr(data, 'magnitude', data)
     data = restrict_time(data)
-    year1 = getattr(index, 'year', index)[-1].item()
-    years = (2000, None) if years is None else years
-    years = np.atleast_1d(years)
-    if years.size == 1:  # use e.g. (None, year) or (year, None) for specific ranges
-        years = np.array([year1 - years[0], year1])
-    if years.size != 2:
+    stop = getattr(index, 'year', index)[-1].item()
+    if np.size(years) == 1:
+        years = np.array(years).item()
+    if years is None:
+        years = (None, None)
+    elif isinstance(years, slice):
+        years = (years.start, years.stop)
+    elif np.size(years) == 1:
+        years = (stop - years[0], stop)
+    elif np.size(years) == 2:
+        years = tuple(np.atleast_1d(years))
+    else:  # use e.g. (None, year) or (year, None) for specific ranges
         raise ValueError(f'Unexpected growth sample years {years}.')
-    if index.name == 'year':
-        loc0, loc1 = years[0], years[1]
-    else:  # datetime indexing
-        loc0 = years[0] and f'{years[0]:04d}-01-01' or None
-        loc1 = years[1] and f'{years[1]:04d}-12-31' or None
+    if index.name == 'year':  # year index range
+        loc0 = years[0] or None
+        loc1 = years[1] or None
+    else:  # convert to datetime
+        loc0 = years[0] and f'{years[0]:04.0f}-01-01'
+        loc1 = years[1] and f'{years[1]:04.0f}-12-31'
     result = data.loc[loc0:loc1]
     result = result if units is None else ureg.Quantity(result, units)
     return result

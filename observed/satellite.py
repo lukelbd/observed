@@ -15,16 +15,16 @@ from cmip_data.utils import assign_dates
 __all__ = ['load_ceres', 'load_erbe']
 
 
-def load_ceres(base=None, file=None, clim=None, average=True, anomaly=True, **kwargs):
+def load_ceres(path=None, climate=None, average=True, anomaly=True, **kwargs):
     """
     Return a dataset with CERES EBF radiative flux estimates.
 
     Parameters
     ----------
-    base, file : path-like
-        The directory and file name.
-    clim : path-like
-        The climatology file name.
+    path : path-like
+        The base file or directory.
+    climate : path-like
+        The climatology file or directory.
     average : bool, optional
         Whether to load global data.
     anomaly : bool, optional
@@ -36,23 +36,17 @@ def load_ceres(base=None, file=None, clim=None, average=True, anomaly=True, **kw
     # NOTE: Full 23 year data uses only TERRA from 2000-2003, TERRA + AQUA from
     # 2003-2019, and NOAA20 afterwards. Product includes bias and drift corrections
     # to prevent discontinuity when satellites change (however could try to detect).
-    base = Path(base or '~/data/ceres').expanduser()
-    if average:
-        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202401_global.nc'
-        clim = clim or 'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_global.nc'
-    else:
-        file = file or 'CERES_EBAF-TOA_Ed4.2_Subset_200003-202401_standardized.nc'
-        clim = clim or 'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_standardized.nc'
-    paths = (clim, file) if anomaly else (file,)
+    from .datasets import _parse_path
+    folder = Path('~/data/ceres').expanduser()
+    name = 'global' if average else 'standardized'
+    ipath = f'CERES_EBAF-TOA_Ed4.2_Subset_200003-202401_{name}.nc'
+    iclimate = f'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_{name}.nc'
+    paths = (climate, path) if anomaly else (path,)
+    ipaths = (iclimate, ipath) if anomaly else (ipath,)
+    regex = re.compile(r'\Ag?([ts])[^_]*_([lsn])[^_]*_((?=a)|clr).*\Z')
     datas = []
-    for path in paths:
-        if not isinstance(path, Path) and '/' not in path:
-            path = base / path
-        if not path.is_file():
-            raise ValueError(f'Path {path} not found.')
-        if path.suffix != '.nc':
-            raise NotImplementedError
-        regex = re.compile(r'\Ag?([ts])[^_]*_([lsn])[^_]*_((?=a)|clr).*\Z')
+    for path, ipath in zip(paths, ipaths):
+        path = _parse_path(path, folder, ipath, exists=('.nc',))
         data = xr.open_dataset(path, engine='netcdf4', use_cftime=True)
         rename = {
             key: 'clt' if 'cldarea' in key

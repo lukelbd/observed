@@ -143,13 +143,13 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
     return temps, fluxes, templabels, fluxlabels, pathlabel
 
 
-def _parse_coords(time, translate=None, **kwargs):
+def _parse_coords(time=None, translate=None, **kwargs):
     """
     Parse `calc_feedback` parameters into feedback version coordinates.
 
     Parameters
     ----------
-    time : xarray.DataArray
+    time, optional : xarray.DataArray
         The reference time coordinates.
     translate : dict, optional
         Additional translations from ``(name, value)`` pairs to coordinates.
@@ -165,14 +165,16 @@ def _parse_coords(time, translate=None, **kwargs):
     # averages across longer period and e.g. '2000-2023' for singular estimate.
     # NOTE: If e.g. have starting month 'jan' for CERES data running from 'mar' to
     # 'nov' then version label will still be '23yr' even though only 22 years used.
-    year0, year1 = time.dt.year.values[[0, -1]]  # {{{
-    month0 = time[0].dt.strftime('%b').item()
-    month = ('initial', month0.lower())
-    years = ('period', f'{year0}-{year1}')
-    translate = {**TRANSLATE_PARAMS, **(translate or {})}
-    translate.setdefault(('month', None), month)
-    translate.setdefault(('years', None), years)  # }}}
     coords = {}
+    translate = TRANSLATE_PARAMS.copy()
+    translate.update(translate or {})
+    if time is not None:  # {{{
+        year0, year1 = time.dt.year.values[[0, -1]]
+        month0 = time[0].dt.strftime('%b').item()
+        month = ('initial', month0.lower())
+        years = ('period', f'{year0}-{year1}')
+        translate.setdefault(('month', None), month)
+        translate.setdefault(('years', None), years)  # }}}
     for key, value in kwargs.items():
         if key in ('pctile', 'correct'):  # {{{
             continue  # concatenated by calc_feedback
@@ -188,6 +190,8 @@ def _parse_coords(time, translate=None, **kwargs):
             value = tuple(value)  # hashable
         if (key, value) in translate:
             _, value = translate[key, value]
+        elif value is None:  # TODO: possibly warn
+            continue
         elif key == 'years' and np.isscalar(value):
             value = f'{np.array(value).item()}yr'
         else:  # fallback version label
@@ -301,8 +305,12 @@ def calc_feedback(
     kw_input = {key: value for key, value in kw_input.items() if value is not None}
     kw_parts = kw_input.copy()
     idetrend = itrend = ()
+    correct = kw_detrend.get('correct', None) or ''
+    correct = correct if isinstance(correct, str) else correct and 'xy' or ''
     if not verbose:  # avoid unnecessary computation
         kw_detrend['correct'] = False
+    if 'x' in correct or 'i' in correct:
+        kw_detrend['correct'] = ''.join(set(correct) - set('ix'))
     for key, value in (('wav', 'f'), ('source', 'gis')):
         kw_parts.setdefault(key, value)
     if not np.isscalar(years):
@@ -343,7 +351,7 @@ def calc_feedback(
     temp, flux = temp[mask], flux[mask]
     func = annual_average if annual else annual_filter
     temp, flux = func(temp, **kw_annual), func(flux, **kw_annual)
-    sample = None  # trend coordinates
+    coords = None  # trend coordinates
     times = [0]  # regression index
     scale = 1 if annual else 12
     size = flux.size  # regression size
@@ -351,7 +359,7 @@ def calc_feedback(
     fits, fits1, fits2 = [], [], []
     if years:
         size = 20 if years is True else years
-        sample = np.linspace(np.min(temp), np.max(temp), 100)
+        coords = np.linspace(np.min(temp), np.max(temp), 100)
         if size % 2:
             raise ValueError(f'Internal variability years {years} must be even.')
         size, step = size * scale, size * scale // 2
@@ -359,13 +367,15 @@ def calc_feedback(
     for time in times:  # regression index
         datas = []
         for idx, data in enumerate((temp, flux)):
-            data = data[time:time + size]
+            idata = data[time:time + size]
             if idx in itrend or idx in idetrend:
                 verb = verbose and time is times[0]
-                data = detrend_dims(data, verbose=verb, **kw_detrend)
-                data = data.fit if idx in itrend else data
-            datas.append(data)
-        result = regress_dims(*datas, sample=sample, **kw_regress)
+                idata = detrend_dims(idata, verbose=verb, **kw_detrend)
+                idata = idata.fit.copy() if idx in itrend else idata
+                idata.name = data.name
+                idata.attrs.update(data.attrs)
+            datas.append(idata)
+        result = regress_dims(*datas, coords=coords, **kw_regress)
         lam, lam1, lam2, *items, _, dof = result
         lams.append(lam)
         lams1.append(lam1)
@@ -396,11 +406,11 @@ def calc_feedback(
     lam2.name = f'{lam_name}2'
     result = (lam, lam1, lam2, dof)
     if fits:  # process fit coordinates
-        coords = dict(fits[0].coords)  # standardized dependent coordinates
+        coord = dict(fits[0].coords)  # standardized dependent coordinates
         if years:
-            fit = xr.concat(fits, **kw_concat).assign_coords(coords)
-            fit1 = xr.concat(fits1, **kw_concat).assign_coords(coords)
-            fit2 = xr.concat(fits2, **kw_concat).assign_coords(coords)
+            fit = xr.concat(fits, **kw_concat).assign_coords(coord)
+            fit1 = xr.concat(fits1, **kw_concat).assign_coords(coord)
+            fit2 = xr.concat(fits2, **kw_concat).assign_coords(coord)
         fit_name = f'{flux.name}_fit'
         fit.name = fit_name
         fit1.name = f'{fit_name}1'

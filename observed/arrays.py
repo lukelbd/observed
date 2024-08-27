@@ -31,7 +31,7 @@ VERBOSE_MESSAGES = set()
 
 def _get_mask(data, ocean=True):
     """
-    Return land mask using `global_land_mask`.
+    Return ocean or land mask using `global_land_mask`.
 
     Parameters
     ----------
@@ -239,9 +239,9 @@ def detrend_dims(data, dim=None, verbose=False, **kwargs):
     # global average will reproduce removal of global average trend.
     dim = dim or 'time'  # {{{
     coord = getattr(data, dim or 'time')  # possibly integer
-    idata = kwargs.pop('sample', None)
+    idata = kwargs.pop('coords', None)
     kwargs['nofit'] = False
-    kwargs['sample'] = None if idata is None else getattr(idata, dim)
+    kwargs['coords'] = None if idata is None else getattr(idata, dim)
     result = regress_dims(coord, data, dim=dim, **kwargs)
     if kwargs.get('nobnds', None):
         slope, *fits, rsq, dof = result
@@ -431,9 +431,10 @@ def regress_dims(
     # by degrees of freedom, i.e. error should approach zero as samples go to infinity.
     # Similar to uncertainty in population mean estimator versus just raw uncertainty.
     # See: https://en.wikipedia.org/wiki/Simple_linear_regression#Normality_assumption
-    keys = [istime if key is None else key for key in np.atleast_1d(correct)]  # {{{
+    dof, rsq = {}, covar ** 2 / (dvar * nvar)  # {{{
+    idim = 'expand' if dim is None else dim
+    keys = [istime if key is None else key for key in np.atleast_1d(correct)]
     keys = ['r' if key and not isinstance(key, str) else key or '' for key in keys]
-    dof, rsq = {}, covar ** 2 / (dvar * nvar)
     with xr.set_options(keep_attrs=True):  # retain numerator units
         resid = numer - (offset + denom * slope)
     if dim is None and any(keys):
@@ -448,12 +449,12 @@ def regress_dims(
         elif key == 'r':  # see climopy
             seq, savg = resid, (wgts * resid).sum(dims, skipna=True)
         else:  # no-op
-            seq, savg = slope.expand_dims(dim).isel({dim: slice(0)}), 0
+            seq, savg = slope.expand_dims(idim).isel({idim: slice(0)}), 0
         if seq.size:  # i.e. non-none correction
-            seq = detrend_dims(seq, dim=dim, manual=manual, correct=False)
-        anom, ianom = seq - savg, seq.shift({dim: 1}) - savg
-        icov = (anom * ianom).mean(dim, skipna=True)
-        ivar = (anom ** 2).mean(dim, skipna=True)
+            seq = detrend_dims(seq, dim=idim, manual=manual, correct=False)
+        anom, ianom = seq - savg, seq.shift({idim: 1}) - savg
+        icov = (anom * ianom).mean(idim, skipna=True)
+        ivar = (anom ** 2).mean(idim, skipna=True)
         corr = (icov / ivar).fillna(0).clip(0, 1)
         cnt = size * (1 - corr) / (1 + corr) - 2
         cnt = xr.DataArray(cnt, attrs={'units': ''})

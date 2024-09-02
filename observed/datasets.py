@@ -13,32 +13,34 @@ from .surface import load_gistemp, load_hadcrut
 __all__ = ['open_dataset', 'open_external']
 
 
-def _parse_path(path, folder, file, exists=False):
+def _parse_path(path, folder, file, *, search=False):
     """
     Parse the user input path.
 
     Parameters
     ----------
     path : path-like
-        The input path.
-    folder : str
+        The user input path.
+    folder : path-like
         The default folder.
-    file : str
+    file : path-like
         The default file name.
-    exists : bool, optional
-        The path suffixes or whether to ensure exists.
+    search : bool, optional
+        Whether to search for the path.
     """
     if isinstance(path, Path) and path.is_dir() or path and '/' in path:
         folder = path
     elif path:
         file = path
-    folder = Path(folder or '')
-    path = folder.expanduser() / file
-    if exists and not path.is_file():
-        raise ValueError(f'Path {str(path)!r} does not exist.')
-    if exists and isinstance(exists, tuple) and path.suffix not in exists:
-        raise NotImplementedError
-    return path
+    base = Path(folder or '')
+    path = base.expanduser() / file
+    if not search:
+        return path
+    paths = list(path.parent.glob(path.name))
+    paths = sorted(path for path in paths if path.is_file())
+    if not paths:
+        raise ValueError(f'Glob pattern {str(path)!r} does not exist.')
+    return paths[-1]  # prefer latest version
 
 
 def open_dataset(

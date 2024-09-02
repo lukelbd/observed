@@ -30,15 +30,16 @@ def load_hadcrut(path=None, average=True, **kwargs):
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
-    # NOTE: 'Apples and Oranges' Jones paper found that comparing HadCRUT with
-    # model surface temperature should actually have only minor effects on results.
-    # TODO: Also include observational uncertainty of individual time series,
-    # not just Gregory regression uncertainty like in He et al.?
+    # TODO: Incorporate observational uncertainty not just regression uncertainty?
+    # NOTE: Standardized data produced in 'climate-data/process.py'
+    # NOTE: Jones 'Apples and Oranges' paper found that comparing HadCRUT with
+    # model surface temperature should has only minor effects on results.
     from .datasets import _parse_path
     folder = Path('~/data/hadcrut5').expanduser()
-    name = 'summary_series.global.monthly' if average else 'anomalies.ensemble_mean_standardized'  # noqa: E501
-    file = f'HadCRUT.5.0.2.0.analysis.{name}.nc'
-    path = _parse_path(path, folder, file, exists=('.nc',))
+    name = 'summary_series' if average else 'anomalies'
+    mode = 'global.monthly' if average else 'ensemble_mean_standardized'
+    file = f'HadCRUT.*.analysis.{name}.{mode}.nc'
+    path = _parse_path(path, folder, file, search=True)
     data = xr.open_dataset(path, use_cftime=True)
     rename = dict(latitude='lat', longitude='lon')  # cdo will rename
     rename.update(tas_mean='ts', tas_lower='ts_lower', tas_upper='ts_upper')
@@ -65,14 +66,14 @@ def load_gistemp(path=None, average=True, **kwargs):
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
-    # NOTE: Standardized data produced in 'process.py' standardize_grid().
+    # NOTE: Standardized data produced in 'climate-data/process.py'
     # NOTE: This is adapted from utils.assign_dates(). Should not bother
     # implementing there since this is special case.
     from .datasets import _parse_path
     folder = Path('~/data/gistemp4').expanduser()
     suffix = 'global.csv' if average else 'standardized.nc'
-    file = f'gistemp1200_GHCNv4_ERSSTv5_{suffix}'
-    path = _parse_path(path, folder, file, exists=('.csv', '.nc'))
+    file = f'gistemp1200_GHCNv?_ERSSTv?_{suffix}'
+    path = _parse_path(path, folder, file, search=True)
     if path.suffix == '.nc':
         data = xr.open_dataset(path, use_cftime=True)
         data = data.rename(tempanomaly='ts')

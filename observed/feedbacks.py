@@ -254,8 +254,8 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
 
 
 def calc_feedback(
-    *args, source=None, wav=None, sky=None, cld=None, sfc=None, years=None, months=None,
-    annual=False, partial=False, detrend=False, verbose=False, **kwargs,
+    *args, source=None, wav=None, sky=None, cld=None, sfc=None,
+    years=None, months=None, annual=False, detrend=False, verbose=False, **kwargs,
 ):
     """
     Return climate feedback calculation for global time series.
@@ -270,8 +270,6 @@ def calc_feedback(
         The number of months to sample beyond calendar years.
     annual : bool, optional
         Whether to use annual anomalies instead of monthly anomalies.
-    partial : bool, optional
-        Whether to allow partial years instead of only 12-month multiples.
     detrend : bool or str, default: False
         Whether to detrend the data. Should be combination of ``'xy'`` or ``'ij'``.
     trends : bool, optional
@@ -358,11 +356,11 @@ def calc_feedback(
         flux = get_result(data, flux, time=None)
     elif not isinstance(flux, xr.DataArray):
         raise ValueError(f'Invalid input temperature {temp!r}')
-    mask = ~temp.isnull() & ~flux.isnull()  # {{{
+    mask = ~temp.isnull() & ~flux.isnull()
     temp, flux = temp[mask], flux[mask]
     if annual:
         temp, flux = (annual_average(_, **kw_annual) for _ in (temp, flux))
-    elif not partial:
+    else:
         temp, flux = (annual_filter(_, **kw_annual) for _ in (temp, flux))
 
     # Get the feedbacks and combine results
@@ -442,7 +440,7 @@ def calc_feedback(
     return result
 
 
-def process_spatial(dataset=None, output=None, partial=True, **kwargs):
+def process_spatial(dataset=None, output=None, **kwargs):
     """
     Save climate feedbacks using `cmip_data.process` and `cmip_data.feedbacks`.
 
@@ -452,8 +450,6 @@ def process_spatial(dataset=None, output=None, partial=True, **kwargs):
         The input dataset. Default is ``open_dataset(globe=True)``.
     output : path-like, optional
         The output directory or name. If ``False`` nothing is saved.
-    partial : bool, optional
-        Whether to allow partial incomplete calendar years.
     **kwargs
         Passed to `annual_filter` and `_feedbacks_from_fluxes`.
     """
@@ -483,29 +479,31 @@ def process_spatial(dataset=None, output=None, partial=True, **kwargs):
         style = 'annual' if kw['annual'] else 'monthly'
         remove = 'average' if kw['anomaly'] else 'climate'
         source = LONGS_SOURCE[kw['source']]
-        kw_filter = {**kwargs, 'anomaly': kw.pop('anomaly', True)}
+        kw_annual = {**kwargs, 'anomaly': kw.pop('anomaly', True)}
         kw_fluxes = dict(style=style, components=('', 'cs'), boundaries=('t',))
-        dataset = dataset if partial else annual_filter(dataset, **kw_filter)
-        result = dataset.rename({f'ts_{source[:3]}': 'ts'})
-        result['ts'] = detrend_dims(result.ts)  # detrend temperature (see above)
+        data = annual_filter(dataset, **kw_annual)
+        data = data.rename({f'ts_{source[:3]}': 'ts'})
+        data['ts'] = detrend_dims(data.ts)  # detrend temperature (see above)
         for values in itertools.product(*parts.values()):
             from coupled.process import get_result
             items = dict(zip(parts, values))
             cld, wav, sky = items['cld'], items['wav'], items['sky']
             cld, sky = (sky, '') if sky == 'cl' else (cld, sky)
             name = f'{cld}_r{wav}nt{sky}'.strip('_')
-            result[name] = get_result(result, name, time=None)
-        names = [name for name in result.data_vars if name[:3] == 'ts_']
+            data[name] = get_result(data, name, time=None)
+        names = [name for name in data.data_vars if name[:3] == 'ts_']
         names += ['rlut', 'rlutcs', 'rsut', 'rsutcs', 'rsdt']
         names += ['x', 'y', 'fit', 'fit1', 'fit2']
-        result = result.drop_vars(names)  # }}}
+        data = data.drop_vars(names)  # }}}
 
         # Save feedback data
         # Facets: ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')
         # Version: ('gis|had', 'monthly|annual', 'region', year1, year2)
-        if output is not False:  # {{{
-            start = dataset.time[0].dt.year.item()
-            stop = dataset.time[-1].dt.year.item()
+        if output is False:  # {{{
+            result = data
+        else:  # calculate feedbacks
+            start = data.time[0].dt.year.item()
+            stop = data.time[-1].dt.year.item()
             head = 'feedbacks_Amon_CERES_historical_flagship'
             tail = f'{start:04d}-{stop:04d}-{source}-{style}-{remove}.nc'
             base = Path('~/data/ceres-feedbacks').expanduser()
@@ -519,7 +517,7 @@ def process_spatial(dataset=None, output=None, partial=True, **kwargs):
             if not base.is_dir():
                 raise ValueError(f'Invalid output location {base}.')
             from cmip_data.feedbacks import _feedbacks_from_fluxes
-            result = _feedbacks_from_fluxes(result, **kw_fluxes)
+            result = _feedbacks_from_fluxes(data, **kw_fluxes)
             print(f'Saving file: {file}')
             result.to_netcdf(base / file)  # }}}
         results.append(result)

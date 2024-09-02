@@ -15,6 +15,7 @@ from climopy import var, ureg, vreg  # noqa: F401
 
 from .datasets import open_dataset
 from .arrays import annual_average, annual_filter, detrend_dims, regress_dims
+from . import _warn_observed
 
 __all__ = ['calc_feedback', 'process_spatial', 'process_scalar']
 
@@ -106,9 +107,9 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
 
     Returns
     -------
-    temps, fluxes : list of str
+    tnames, rnames : list of str
         The temperature and flux variable(s).
-    templabels, fluxlabels : list of str, optional
+    tlabels, rlabels : list of str, optional
         The temperature and flux readable labels.
     pathlabel : str
         The path label suitable for figures.
@@ -126,21 +127,21 @@ def _parse_names(source=None, wav=None, sky=None, cld=None, sfc=None):
     wavs = () if not wavs else (wavs,) if isinstance(wavs, str) else wavs
 
     # Generate variables and labels
-    temps = tuple(f'ts_{source}' for source in sources)  # {{{
-    names = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)
-    fluxes = tuple(
+    tnames = tuple(f'ts_{source}' for source in sources)  # {{{
+    inames = tuple(f'rs{wav}{sfc}' if wav in 'ud' else f'r{wav}n{sfc}' for wav in wavs)
+    rnames = tuple(
         f'{cld}_{rad}' if cld else f'{rad}{sky}'
-        for cld, sky, rad in itertools.product(clds, skies, names)
+        for cld, sky, rad in itertools.product(clds, skies, inames)
     )
-    templabels = [LABELS_SOURCE[source] for source in sources]
-    fluxlabels = [
+    tlabels = [LABELS_SOURCE[source] for source in sources]
+    rlabels = [
         ' '.join(filter(None, (LABELS_WAVELEN[wav], LABELS_CLOUD[cld or sky])))
         for cld, sky, wav in itertools.product(clds, skies, wavs)
     ]
-    pathtemps = '-'.join(filter(None, ('ts', *sources)))
-    pathfluxes = '-'.join(filter(None, (*names, *clds, *skies)))
-    pathlabel = '_'.join(filter(None, (pathtemps, pathfluxes)))
-    return temps, fluxes, templabels, fluxlabels, pathlabel
+    tpathlabel = '-'.join(filter(None, ('ts', *sources)))
+    rpathlabel = '-'.join(filter(None, (*inames, *clds, *skies)))
+    pathlabel = '_'.join(filter(None, (tpathlabel, rpathlabel)))
+    return tnames, rnames, tlabels, rlabels, pathlabel
 
 
 def _parse_coords(time=None, translate=None, **kwargs):
@@ -166,20 +167,20 @@ def _parse_coords(time=None, translate=None, **kwargs):
     # NOTE: If e.g. have starting month 'jan' for CERES data running from 'mar' to
     # 'nov' then version label will still be '23yr' even though only 22 years used.
     coords = {}
-    translate = TRANSLATE_PARAMS.copy()
-    translate.update(translate or {})
+    names = TRANSLATE_PARAMS.copy()
+    names.update(translate or {})
     if time is not None:  # {{{
         year0, year1 = time.dt.year.values[[0, -1]]
         month0 = time[0].dt.strftime('%b').item()
         month = ('initial', month0.lower())
         years = ('period', f'{year0}-{year1}')
-        translate.setdefault(('month', None), month)
-        translate.setdefault(('years', None), years)  # }}}
+        names.setdefault(('month', None), month)
+        names.setdefault(('years', None), years)  # }}}
     for key, value in kwargs.items():
         if key in ('pctile', 'correct'):  # {{{
             continue  # concatenated by calc_feedback
-        if (key, None) in translate:
-            name, _ = translate[key, None]
+        if (key, None) in names:
+            name, _ = names[key, None]
         else:  # e.g. 'source' and 'detrend'
             name = key
         if key == 'source':
@@ -188,8 +189,8 @@ def _parse_coords(time=None, translate=None, **kwargs):
             value = (value.start, value.stop)
         if np.iterable(value) and not isinstance(value, str):
             value = tuple(value)  # hashable
-        if (key, value) in translate:
-            _, value = translate[key, value]
+        if (key, value) in names:
+            _, value = names[key, value]
         elif value is None:  # TODO: possibly warn
             continue
         elif key == 'years' and np.isscalar(value):
@@ -254,7 +255,7 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
 
 def calc_feedback(
     dataset, *args, source=None, wav=None, sky=None, cld=None, sfc=None,
-    years=None, annual=False, detrend=False, verbose=False, **kwargs,
+    years=None, months=None, annual=False, detrend=False, verbose=False, **kwargs,
 ):
     """
     Return climate feedback calculation for global time series.
@@ -267,6 +268,8 @@ def calc_feedback(
         The optional explicit variable names.
     years : int or 2-tuple, optional
         The number of years to sample for internal variability or the year range.
+    months : int, optional
+        The number of months to sample beyond calendar years.
     annual : bool, optional
         Whether to use annual anomalies instead of monthly anomalies.
     detrend : bool or str, default: False
@@ -357,13 +360,15 @@ def calc_feedback(
     size = flux.size  # regression size
     lams, lams1, lams2, dofs = [], [], [], []
     fits, fits1, fits2 = [], [], []
-    if years:
-        size = 20 if years is True else years
+    if years is not None and years is not False:
+        years, months = 20 if years is True else years, months or 0
         coords = np.linspace(np.min(temp), np.max(temp), 100)
-        if size % 2:
-            raise ValueError(f'Internal variability years {years} must be even.')
-        size, step = size * scale, size * scale // 2
+        size, step = months + scale * years, scale * (years // 2)
         times = np.arange(0, flux.size - size + scale, step)  # NOTE: see above
+        offset = flux.size - (times[-1] + size)
+        if offset > 0:
+            msg = f'{offset / scale:.0f}/{flux.size / scale:.0f}'
+            _warn_observed(f'Period {years} requires ignoring last {msg} years')
     for time in times:  # regression index
         datas = []
         for idx, data in enumerate((temp, flux)):

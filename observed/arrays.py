@@ -207,7 +207,6 @@ def annual_filter(data, years=None, month=None, anomaly=False, partial=False):
     idxs2, = np.nonzero(months == (month - 2) % 12 + 1)  # 1 --> 12
     idxs = (idxs1[0], None if partial else idxs2[-1] + 1)  # month indices
     years = (years[0] and years[0] * 12, years[1] and years[1] * 12)
-    ic(years)
     result = data.isel(time=slice(*idxs)).isel(time=slice(*years))
     if anomaly:  # note data already in anomaly form, but this uses selected period
         climate = result.groupby('time.month').mean()

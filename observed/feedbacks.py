@@ -60,7 +60,7 @@ PARTS_TESTING = {key: value[:2] for key, value in PARTS_DEFAULT.items()}
 PARAMS_DEFAULT = {
     'source': ('gis', 'had'),
     'years': (None,),  # named 'period'
-    'month': ('jan', 'jul'),  # named 'initial'
+    'month': ('mar', 'jan'),  # named 'initial'
     'annual': (False, True),  # named 'style'
     'anomaly': (True, False),  # named 'remove'
     'detrend': ('xy', 'x', 'y', ''),
@@ -254,24 +254,24 @@ def _parse_kwargs(skip_keys=None, skip_values=None, testing=None, **kwargs):
 
 
 def calc_feedback(
-    dataset, *args, source=None, wav=None, sky=None, cld=None, sfc=None,
-    years=None, months=None, annual=False, detrend=False, verbose=False, **kwargs,
+    *args, source=None, wav=None, sky=None, cld=None, sfc=None, years=None, months=None,
+    annual=False, partial=False, detrend=False, verbose=False, **kwargs,
 ):
     """
     Return climate feedback calculation for global time series.
 
     Parameters
     ----------
-    dataset : xarray.Dataset
-        The flux and temperature data from `open_dataset`.
-    *args : str, optional
-        The optional explicit variable names.
+    *args : xarray.Dataset, xarray.DataArray, or str, optional
+        The dataset and/or data arrays or the optional explicit variable names.
     years : int or 2-tuple, optional
         The number of years to sample for internal variability or the year range.
     months : int, optional
         The number of months to sample beyond calendar years.
     annual : bool, optional
         Whether to use annual anomalies instead of monthly anomalies.
+    partial : bool, optional
+        Whether to allow partial years instead of only 12-month multiples.
     detrend : bool or str, default: False
         Whether to detrend the data. Should be combination of ``'xy'`` or ``'ij'``.
     trends : bool, optional
@@ -294,11 +294,9 @@ def calc_feedback(
     fit, fit1, fit2 : xarray.DataArray
         The regresson fit.
     """
-    # Get the data arrays
+    # Parse keyword arguments
     # NOTE: Here 'years' is used to both specify period size when bootstrapping control
     # or historical data or to restrict time range when passed to `annual_filter`.
-    # NOTE: Critical to pass time=None or else time average taken automatically. Note
-    # flux components e.g. 'rfnt' will be auto-derived from e.g. 'rsdt' 'rsut' 'rlut'.
     from coupled.process import get_result
     from coupled.specs import _pop_kwargs
     kw_annual = _pop_kwargs(kwargs, annual_filter)  # {{{
@@ -316,16 +314,6 @@ def calc_feedback(
         kw_detrend['correct'] = ''.join(set(correct) - set('ix'))
     for key, value in (('wav', 'f'), ('source', 'gis')):
         kw_parts.setdefault(key, value)
-    if not np.isscalar(years):
-        kw_annual['years'], years = years, None
-    if not args:
-        (temp,), (flux,), *_ = _parse_names(**kw_parts)
-    elif len(args) != 2:
-        raise TypeError(f'Got {len(args)} positional names but expected zero or two.')
-    elif label := ', '.join(f'{key}={value!r}' for key, value in kw_input.items()):
-        raise TypeError(f'Keyword arguments {label} incompatible with positional arguments.')  # noqa: E501
-    else:  # user input values
-        temp, flux = args
     if detrend in ('xy', 'yx') or detrend is True:
         idetrend = (0, 1)
     elif detrend == 'y':  # flux only
@@ -340,8 +328,42 @@ def calc_feedback(
         itrend = (0,)
     elif detrend:
         raise ValueError(f"Invalid {detrend=}. Should be string of 'xy' or 'ij'.")
-    temp = get_result(dataset, temp, time=None)  # forget time coordinates
-    flux = get_result(dataset, flux, time=None)
+
+    # Parse positional arguments
+    # NOTE: Critical to pass time=None or else time average taken automatically. Note
+    # flux components e.g. 'rfnt' will be auto-derived from e.g. 'rsdt' 'rsut' 'rlut'.
+    if not np.isscalar(years):  # {{{
+        kw_annual['years'], years = years, None
+    if len(args) == 1:
+        data, temp, flux = *args, None, None
+    elif len(args) == 2:
+        data, temp, flux = None, *args
+    elif len(args) == 3:
+        data, temp, flux = args
+    else:
+        raise TypeError(f'Got {len(args)} positional names but expected one to three.')
+    if temp is None or flux is None:
+        (itemp,), (iflux,), *_ = _parse_names(**kw_parts)
+        temp, flux = itemp if temp is None else temp, iflux if flux is None else flux
+    elif kw_input:  # incompatible keywords
+        msg = ', '.join(f'{key}={value!r}' for key, value in kw_input.items())
+        raise TypeError(f'Keyword arguments {msg} incompatible with positional arguments.')  # noqa: E501
+    if not isinstance(data, xr.Dataset) and any(isinstance(_, str) for _ in (temp, flux)):  # noqa: E501
+        raise TypeError(f'Dataset required for temperature {temp!r} and flux {flux!r}.')
+    if isinstance(temp, str):
+        temp = get_result(data, temp, time=None)  # forget time coordinates
+    elif not isinstance(temp, xr.DataArray):
+        raise ValueError(f'Invalid input temperature {temp!r}')
+    if isinstance(flux, str):
+        flux = get_result(data, flux, time=None)
+    elif not isinstance(flux, xr.DataArray):
+        raise ValueError(f'Invalid input temperature {temp!r}')
+    mask = ~temp.isnull() & ~flux.isnull()  # {{{
+    temp, flux = temp[mask], flux[mask]
+    if annual:
+        temp, flux = (annual_average(_, **kw_annual) for _ in (temp, flux))
+    elif not partial:
+        temp, flux = (annual_filter(_, **kw_annual) for _ in (temp, flux))
 
     # Get the feedbacks and combine results
     # WARNING: If calculating e.g. feedbacks starting in July for 150-year control
@@ -350,10 +372,6 @@ def calc_feedback(
     # NOTE: Previously embedded annual stuff inside regress_dims so **kwargs would
     # do it twice but with bootstrapping need to ensure correct starting months are
     # selected or e.g. might select 19-year sample instead of 20-year sample.
-    mask = ~temp.isnull() & ~flux.isnull()  # {{{
-    temp, flux = temp[mask], flux[mask]
-    func = annual_average if annual else annual_filter
-    temp, flux = func(temp, **kw_annual), func(flux, **kw_annual)
     coords = None  # trend coordinates
     times = [0]  # regression index
     scale = 1 if annual else 12
@@ -424,7 +442,7 @@ def calc_feedback(
     return result
 
 
-def process_spatial(dataset=None, output=None, **kwargs):
+def process_spatial(dataset=None, output=None, partial=True, **kwargs):
     """
     Save climate feedbacks using `cmip_data.process` and `cmip_data.feedbacks`.
 
@@ -434,6 +452,8 @@ def process_spatial(dataset=None, output=None, **kwargs):
         The input dataset. Default is ``open_dataset(globe=True)``.
     output : path-like, optional
         The output directory or name. If ``False`` nothing is saved.
+    partial : bool, optional
+        Whether to allow partial incomplete calendar years.
     **kwargs
         Passed to `annual_filter` and `_feedbacks_from_fluxes`.
     """
@@ -465,7 +485,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         source = LONGS_SOURCE[kw['source']]
         kw_filter = {**kwargs, 'anomaly': kw.pop('anomaly', True)}
         kw_fluxes = dict(style=style, components=('', 'cs'), boundaries=('t',))
-        dataset = annual_filter(dataset, **kw_filter)
+        dataset = dataset if partial else annual_filter(dataset, **kw_filter)
         result = dataset.rename({f'ts_{source[:3]}': 'ts'})
         result['ts'] = detrend_dims(result.ts)  # detrend temperature (see above)
         for values in itertools.product(*parts.values()):
@@ -507,7 +527,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
     return results
 
 
-def process_scalar(dataset=None, output=None, **kwargs):
+def process_scalar(dataset=None, output=None, suffix=None, **kwargs):
     """
     Save global climate feedbacks and uncertainty using `observed.calc_feedbacks`.
 
@@ -517,6 +537,8 @@ def process_scalar(dataset=None, output=None, **kwargs):
         The input dataset. Default is ``open_dataset(globe=False)``.
     output : bool or path-like, optional
         The output directory or name. If ``False`` nothing is saved.
+    suffix : str, optional
+        The output file suffix.
     **kwargs
         Passed to `calc_feedbacks`.
     """
@@ -532,7 +554,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     else:  # print message
         print('Calculating global climate feedbacks.')
     testing = kwargs.get('testing', False)
-    suffix = kwargs.get('source', '')
+    suffix = suffix or kwargs.get('source', '')
     params, parts, kwargs = _parse_kwargs(**kwargs)
     translate = kwargs.pop('translate', None)
     results = {}
@@ -542,7 +564,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
         kwarg.update(kwargs)
         years = kwarg.get('years', None)
         source = kwarg.pop('source', None) or ''
-        source = source if source[:3] in ('had', 'gis') else ''
+        source = source if source[:3] in ('had', 'gis', 'he') else ''
         sample = years is not None and np.isscalar(years)
         level, _ = TRANSLATE_PARAMS['internal', None]
         levels = (*coord, level, 'correct')  # see below
@@ -615,7 +637,7 @@ def process_scalar(dataset=None, output=None, **kwargs):
     if output is False:  # end printing
         print(')', end=' ')
     else:  # save result
-        suffix = suffix and f'-{suffix}'
+        suffix = suffix and f'_{suffix}'
         base = Path('~/data/global-feedbacks').expanduser()
         file = 'tmp.nc' if testing else f'feedbacks_CERES_global{suffix}.nc'
         if isinstance(output, str) and '/' not in output:

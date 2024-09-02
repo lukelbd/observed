@@ -203,9 +203,9 @@ def annual_filter(data, years=None, month=None, anomaly=False):
         month = int(month)  # integer month
     idxs1, = np.nonzero(months == month)
     idxs2, = np.nonzero(months == (month - 2) % 12 + 1)  # 1 --> 12
+    idxs = (idxs1[0], idxs2[-1] + 1)  # month indices
     years = (years[0] and years[0] * 12, years[1] and years[1] * 12)
-    result = data.isel(time=slice(idxs1[0], idxs2[-1] + 1))
-    result = data.isel(time=slice(*years))
+    result = data.isel(time=slice(*idxs)).isel(time=slice(*years))
     if anomaly:  # note data already in anomaly form, but this uses selected period
         climate = result.groupby('time.month').mean()
         with xr.set_options(keep_attrs=True):

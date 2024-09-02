@@ -15,16 +15,16 @@ from cmip_data.utils import assign_dates
 __all__ = ['load_ceres', 'load_erbe']
 
 
-def load_ceres(path=None, climate=None, average=True, anomaly=True, **kwargs):
+def load_ceres(path=None, path0=None, *, average=True, anomaly=True, **kwargs):
     """
     Return a dataset with CERES EBF radiative flux estimates.
 
     Parameters
     ----------
     path : path-like
-        The base file or directory.
-    climate : path-like
-        The climatology file or directory.
+        The source file or directory.
+    path0 : path-like
+        The climate file or directory.
     average : bool, optional
         Whether to load global data.
     anomaly : bool, optional
@@ -32,21 +32,22 @@ def load_ceres(path=None, climate=None, average=True, anomaly=True, **kwargs):
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
-    # NOTE: Standardized data produced in 'arrays.py' standardize_dims().
+    # NOTE: Standardized data produced in 'climate-data/process.py'
     # NOTE: Full 23 year data uses only TERRA from 2000-2003, TERRA + AQUA from
     # 2003-2019, and NOAA20 afterwards. Product includes bias and drift corrections
     # to prevent discontinuity when satellites change (however could try to detect).
     from .datasets import _parse_path
     folder = Path('~/data/ceres').expanduser()
+    iglob = '[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
     name = 'global' if average else 'standardized'
-    ipath = f'CERES_EBAF-TOA_Ed4.2_Subset_200003-202401_{name}.nc'
-    iclimate = f'CERES_EBAF-TOA_Ed4.2_Subset_CLIM01-CLIM12_{name}.nc'
-    paths = (climate, path) if anomaly else (path,)
-    ipaths = (iclimate, ipath) if anomaly else (ipath,)
+    glob0 = f'CERES_EBAF-TOA_*_CLIM01-CLIM12_{name}.nc'
+    glob = f'CERES_EBAF-TOA_*_{iglob}_{name}.nc'
+    paths = (path0, path) if anomaly else (path,)
+    globs = (glob0, glob) if anomaly else (glob,)
     regex = re.compile(r'\Ag?([ts])[^_]*_([lsn])[^_]*_((?=a)|clr).*\Z')
     datas = []
-    for path, ipath in zip(paths, ipaths):
-        path = _parse_path(path, folder, ipath, exists=('.nc',))
+    for path, glob in zip(paths, globs):
+        path = _parse_path(path, folder, glob, search=True)
         data = xr.open_dataset(path, engine='netcdf4', use_cftime=True)
         rename = {
             key: 'clt' if 'cldarea' in key
@@ -86,7 +87,7 @@ def load_ceres(path=None, climate=None, average=True, anomaly=True, **kwargs):
     return data.sel(**kwargs)
 
 
-def load_erbe(base=None):
+def load_erbe(path=None):
     """
     Return a dataset with ERBE radiative flux estimates.
 
@@ -103,4 +104,5 @@ def load_erbe(base=None):
     **kwargs
         Passed to `xarray.Dataset.sel`.
     """
-    base  # TODO: Finish this
+    # NOTE: Standardized data produced in 'climate-data/process.py'
+    path  # TODO: Complete this

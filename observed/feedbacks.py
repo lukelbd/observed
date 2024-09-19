@@ -475,6 +475,7 @@ def process_scalar(dataset=None, output=None, suffix=None, **kwargs):
         kwarg = dict(zip(params, values))
         coord = _parse_coords(dataset.time, translate, **kwarg)
         kwarg.update(kwargs)
+        kwarg.update(nofit=True, pctile=False)  # pctile=False -> +/- sigma
         years = kwarg.get('years', None)
         source = kwarg.pop('source', None) or ''
         source = source if source[:3] in ('had', 'gis', 'he') else ''
@@ -488,7 +489,6 @@ def process_scalar(dataset=None, output=None, suffix=None, **kwargs):
         else:  # detailed information
             print(' '.join(f'{key} {value!r}' for key, value in coord.items()))
         for values in itertools.product(*parts.values()):
-            kw = dict(nofit=True, pctile=False, **kwarg)  # pctile=False -> +/- sigma
             opts = dict(zip(parts, values))
             if not source:  # _parse_kwargs only keeps if 'names' not passed
                 name, cld, wav, sky = values[0], '', '', ''
@@ -498,7 +498,7 @@ def process_scalar(dataset=None, output=None, suffix=None, **kwargs):
                 cld, sky = sky, ''
             temp = f'ts_{source[:3]}'.strip('_')
             flux = name or f'{cld}_r{wav}nt{sky}'.strip('_')
-            lam, sigma1, sigma2, dof, *_ = calc_feedback(dataset, temp, flux, **kw)
+            lam, sigma1, sigma2, dof, *_ = calc_feedback(dataset, temp, flux, **kwarg)
             mean = lam.mean('sample') if sample else lam
             sigma = 0.5 * (sigma2 - sigma1)
             for internal in internals:
@@ -593,7 +593,7 @@ def process_spatial(dataset=None, output=None, **kwargs):
         raise ValueError('Input argument must be a dataset.')
     if 'correct' in kwargs or 'pctile' in kwargs:
         raise TypeError('Invalid input arguments.')
-    skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cl')
+    skip_keys, skip_values = ('correct', 'detrend', 'month'), ('f', 'ce', 'cl')
     params, parts, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
 
     # Calculate feedback versions
@@ -621,10 +621,10 @@ def process_spatial(dataset=None, output=None, **kwargs):
             cld, sky = (sky, '') if sky == 'cl' else (cld, sky)
             name = f'{cld}_r{wav}nt{sky}'.strip('_')
             data[name] = get_result(data, name, time=None)
-        names = [name for name in data.data_vars if name[:3] == 'ts_']
-        names += ['rlut', 'rlutcs', 'rsut', 'rsutcs', 'rsdt']
-        names += ['x', 'y', 'fit', 'fit1', 'fit2']
-        data = data.drop_vars(names)  # }}}
+        keys = [name for name in data.data_vars if name[:3] == 'ts_']
+        keys.extend(('x', 'y', 'fit', 'fit1', 'fit2'))
+        keys.extend(('rlut', 'rlutcs', 'rsut', 'rsutcs', 'rsdt', 'clt'))
+        data = data.drop_vars((data.keys() | data.coords.keys()) & set(keys))  # }}}
 
         # Save feedback data
         # Facets: ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')

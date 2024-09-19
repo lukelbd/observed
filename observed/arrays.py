@@ -22,40 +22,49 @@ __all__ = [
     'annual_filter',
     'detrend_dims',
     'regress_dims',
+    'mask_region',
 ]
+
+# Region masks
+# NOTE: Should also add 'mask' argument to climopy 'average'
+REGION_MASKS = {
+    'globe': [
+        {'lat': (-60, 60)},
+    ],
+    'natl': [
+        {'lat': (20, 60), 'lon': (-80, 0)},
+    ],
+    'npac': [
+        {'lat': (20, 60), 'lon': (120, 180)},
+        {'lat': (20, 60), 'lon': (-180, -100)},
+    ],
+    'tatl': [
+        {'lat': (-40, 10), 'lon': (-70, 0)},
+        {'lat': (-40, 10), 'lon': (0, 20)},
+        {'lat': (10, 40), 'lon': (-80, 0)},
+    ],
+    'tpac': [
+        {'lat': (-40, -10), 'lon': (150, 180)},
+        {'lat': (-10, 40), 'lon': (100, 180)},
+        {'lat': (-40, 10), 'lon': (-180, -70)},
+        {'lat': (10, 40), 'lon': (-180, -100)},
+    ],
+    'atl': [  # see davis et al. 2019
+        {'lat': (-60, 10), 'lon': (-70, 0)},
+        {'lat': (-60, 10), 'lon': (0, 20)},
+        {'lat': (10, 60), 'lon': (-80, 0)},
+    ],
+    'pac': [  # see davis et al. 2019
+        {'lat': (-60, -10), 'lon': (150, 180)},
+        {'lat': (-10, 60), 'lon': (100, 180)},
+        {'lat': (-60, 10), 'lon': (-180, -70)},
+        {'lat': (10, 60), 'lon': (-180, -100)},
+    ],
+}
 
 # Message cache
 # NOTE: Used to prevent duplicate trend messages
 VERBOSE_MESSAGES = set()
-
-
-def _get_mask(data, ocean=True):
-    """
-    Return ocean or land mask using `global_land_mask`.
-
-    Parameters
-    ----------
-    data : xarray.DataArray
-        The input array.
-    ocean : bool, optional
-        Whether to keep ocean or land.
-
-    Returns
-    -------
-    mask : xarray.DataArray
-        A boolean masking array.
-    """
-    from global_land_mask import globe
-    lat = data.lat.values  # {{{
-    lon = data.lon.values % 180  # convention
-    lon, lat = np.meshgrid(lon, lat)  # creates lat x lon arrays
-    if ocean:  # ocean only
-        mask = globe.is_ocean(lat, lon)
-    else:  # land only
-        mask = globe.is_land(lat, lon)
-    coords = {'lat': data.lat, 'lon': data.lon}
-    mask = xr.DataArray(mask, dims=('lat', 'lon'), coords=coords)
-    return mask
 
 
 def to_decimal(data, dim=None, coords=None):
@@ -280,9 +289,55 @@ def detrend_dims(data, dim=None, verbose=False, **kwargs):
     return data
 
 
+def mask_region(data, *args, ocean=None, land=None):
+    """
+    Return ocean or land mask using `global_land_mask`.
+
+    Parameters
+    ----------
+    data : xarray.DataArray
+        The input array.
+    *args : str, optional
+        The optional region(s) to mask out.
+    ocean : bool, optional
+        Whether to mask out ocean. Note ``ocean=False`` is equivalent to ``land=True``.
+    land : bool, optional
+        Whether to mask out land. Note ``land=False`` is equivalent to ``ocean=True``.
+
+    Returns
+    -------
+    mask : xarray.DataArray
+        A boolean masking array.
+    """
+    # TODO: Consider moving to climopy, adding mechanism for defining regions, and
+    # supporting arbitrary cf longitude latitude coordinate names instead of standard.
+    from global_land_mask import globe
+    lon = data.lon.values.copy()  # {{{
+    lat = data.lat.values.copy()
+    lon[lon > 180] -= 360  # plugin convention
+    lon, lat = np.meshgrid(lon, lat)  # creates lat x lon arrays
+    mask1 = np.ones(lon.shape, dtype=bool)
+    mask2 = np.zeros(lon.shape, dtype=bool)
+    if ocean or land is not None and not land:  # ocean only
+        mask1 &= globe.is_ocean(lat, lon)
+    if land or ocean is not None and not ocean:  # land only
+        mask1 &= globe.is_land(lat, lon)
+    for name in args:
+        if name not in REGION_MASKS:
+            msg = ', '.join(map(repr, REGION_MASKS))
+            raise ValueError(f'Invalid region {name!r}. Options are: {msg}')
+        for bnds in REGION_MASKS[name]:  # -180 to 180 convention
+            (lon1, lon2), (lat1, lat2) = bnds['lon'], bnds['lat']
+            mask2 |= (lon >= lon1) & (lon <= lon2) & (lat >= lat1) & (lat <= lat2)
+    coord = {'lat': data.lat, 'lon': data.lon}
+    mask = mask1 & mask2 if args else mask1
+    mask = xr.DataArray(mask, dims=('lat', 'lon'), coords=coord)
+    return mask
+
+
 def regress_dims(
-    denom, numer, dim=None, raw=False, stat=None, ocean=None, weights=None, coords=None,
-    correct=None, pctile=True, manual=False, nobnds=False, nofit=None, nofitbnds=None,
+    denom, numer, dim=None, raw=False, stat=None, weights=None, mask=None, ocean=None, land=None,  # noqa: E501
+    coords=None, correct=None, pctile=True, manual=False, nobnds=False, nofit=None, nofitbnds=None,  # noqa: E501
 ):
     """
     Return regression parameters.
@@ -297,10 +352,12 @@ def regress_dims(
         Whether to skip removing the mean before the projection.
     stat : {'slope', 'proj', 'covar', 'corr', 'rsq'}, optional
         Whether to return the input statistic instead of slope.
-    ocean : bool, optional
-        Whether to mask to only ocean or only land.
     weights : array-like, optional
         The manual weights used for the fit. Default is nothing.
+    mask : str, optional
+        The optional regional mask to apply.
+    ocean, land : bool, optional
+        Whether to mask out ocean or land.
     coords : array-like, optional
         The coordinates used for the fit. Default is `denom`.
 
@@ -324,6 +381,8 @@ def regress_dims(
     nofitbnds : bool, optional
         Whether to skip calculating fit bounds. If ``True`` the two fit bound arguments
         are not returned and the denominator coordinate is not sorted.
+    **kwargs
+        Passed to `_mask_region`. Used to mask out regions.
 
     Returns
     -------
@@ -339,8 +398,8 @@ def regress_dims(
         The degrees of freedom and variance explained. Skipped if `nobnds` and `nofit`.
     """
     # Get regression estimates
-    # NOTE: Critical to auto-drop 'x', 'y', 'fit', 'fit_lower', and 'fit_upper' coords
-    # left over from detrending or else get weird hard-to-debug errors (see below).
+    # NOTE: Critical to auto-drop 'x', 'y', 'fit', 'fit1', and 'fit2' coords remaining
+    # from detrending or else get weird hard-to-debug errors (see below).
     # TODO: Also use this for e.g. weighted standard deviations, variance, and other
     # statistics. Should add to climopy and incorporate with covariance driver.
     # TODO: Move this into climopy linefit(). Currently 'institute-factor' does not
@@ -364,9 +423,9 @@ def regress_dims(
         numer = numer.climo.add_cell_measures()
         dims, *parts = numer.climo._parse_weights(dims, weight=weights, **kw_parse)
         wgts = math.prod(wgt.climo.dequantify() for wgts in parts for wgt in wgts)
-    if ocean is not None:  # TODO: improve this
-        mask1 = _get_mask(denom, ocean=ocean)
-        mask2 = _get_mask(numer, ocean=ocean)
+    if any((mask, ocean, land)):  # TODO: improve this
+        mask1 = mask_region(denom, mask, ocean=ocean, land=land)
+        mask2 = mask_region(numer, mask, ocean=ocean, land=land)
         wgts = xr.where(mask1 | mask2, wgts, 0)
     denom = denom.drop_vars(denom.coords.keys() - denom.sizes.keys())
     numer = numer.drop_vars(numer.coords.keys() - numer.sizes.keys())

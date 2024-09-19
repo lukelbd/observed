@@ -81,7 +81,7 @@ TRANSLATE_PARAMS = {
     ('internal', True): ('error', 'internal'),
 }
 TRANSLATE_PARAMS.update(  # _parse_coords sets 'None'
-    {('years', True): ('period', '20yr'), ('month', None): ('initial', 'init')},
+    {('years', True): ('period', '24yr'), ('month', None): ('initial', 'init')},
 )
 TRANSLATE_PARAMS.update(  # _parse_coords sets 'None'
     {('month', n): ('initial', datetime(1, n, 1).strftime('%b')) for n in range(1, 13)},
@@ -162,7 +162,7 @@ def _parse_coords(time=None, translate=None, **kwargs):
     coords : dict
         The feedback version coordinates.
     """
-    # NOTE: Here use label e.g. '20yr' for feedbacks constructed from multiple
+    # NOTE: Here use label e.g. '24yr' for feedbacks constructed from multiple
     # averages across longer period and e.g. '2000-2023' for singular estimate.
     # NOTE: If e.g. have starting month 'jan' for CERES data running from 'mar' to
     # 'nov' then version label will still be '23yr' even though only 22 years used.
@@ -440,91 +440,6 @@ def calc_feedback(
     return result
 
 
-def process_spatial(dataset=None, output=None, **kwargs):
-    """
-    Save climate feedbacks using `cmip_data.process` and `cmip_data.feedbacks`.
-
-    Parameters
-    ----------
-    dataset : xarray.Dataset, optional
-        The input dataset. Default is ``open_dataset(globe=True)``.
-    output : path-like, optional
-        The output directory or name. If ``False`` nothing is saved.
-    **kwargs
-        Passed to `annual_filter` and `_feedbacks_from_fluxes`.
-    """
-    # Initial stuff
-    # NOTE: Here _feedbacks_from_fluxes() does not support detrending so instead apply
-    # detrending to input data. Then global averages of detrended process_spatial()
-    # results are identical to detrended process_scalar() (see jupyter notebook).
-    if dataset is None:  # {{{
-        dataset = open_dataset(globe=False)
-    if not isinstance(dataset, xr.Dataset):
-        raise ValueError('Input argument must be a dataset.')
-    if 'correct' in kwargs or 'pctile' in kwargs:
-        raise TypeError('Invalid input arguments.')
-    skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cl')
-    params, parts, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
-
-    # Calculate feedback versions
-    # NOTE: Feedbacks normalized by local T still capture 'internal' component and when
-    # _feedbacks_from_fluxes() takes global average for 'globe' region, result is same
-    # as average of uncorrected T minus average of T trends i.e. same as scalar detrend
-    results = []
-    for values in itertools.product(*params.values()):
-        # Create dataset and calculate climate feedbacks
-        # NOTE: Retain flux trends since they do not affect least squares regression
-        # estimate, only affect uncertainty. See jupyter notebook for examples.
-        kw = dict(zip(params, values))  # {{{
-        style = 'annual' if kw['annual'] else 'monthly'
-        remove = 'average' if kw['anomaly'] else 'climate'
-        source = LONGS_SOURCE[kw['source']]
-        kw_annual = {**kwargs, 'anomaly': kw.pop('anomaly', True)}
-        kw_fluxes = dict(style=style, components=('', 'cs'), boundaries=('t',))
-        data = annual_filter(dataset, **kw_annual)
-        data = data.rename({f'ts_{source[:3]}': 'ts'})
-        data['ts'] = detrend_dims(data.ts)  # detrend temperature (see above)
-        for values in itertools.product(*parts.values()):
-            from coupled.process import get_result
-            items = dict(zip(parts, values))
-            cld, wav, sky = items['cld'], items['wav'], items['sky']
-            cld, sky = (sky, '') if sky == 'cl' else (cld, sky)
-            name = f'{cld}_r{wav}nt{sky}'.strip('_')
-            data[name] = get_result(data, name, time=None)
-        names = [name for name in data.data_vars if name[:3] == 'ts_']
-        names += ['rlut', 'rlutcs', 'rsut', 'rsutcs', 'rsdt']
-        names += ['x', 'y', 'fit', 'fit1', 'fit2']
-        data = data.drop_vars(names)  # }}}
-
-        # Save feedback data
-        # Facets: ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')
-        # Version: ('gis|had', 'monthly|annual', 'region', year1, year2)
-        if output is False:  # {{{
-            result = data
-        else:  # calculate feedbacks
-            start = data.time[0].dt.year.item()
-            stop = data.time[-1].dt.year.item()
-            head = 'feedbacks_Amon_CERES_historical_flagship'
-            tail = f'{start:04d}-{stop:04d}-{source}-{style}-{remove}.nc'
-            base = Path('~/data/ceres-feedbacks').expanduser()
-            file = '_'.join((head, tail))
-            if isinstance(output, Path) or '/' in (output or ''):  # copy to general.py
-                base = Path(output).expanduser()
-            elif output is not None:  # copy to general.py
-                file = output
-            if not base.is_dir():
-                os.mkdir(base)
-            if not base.is_dir():
-                raise ValueError(f'Invalid output location {base}.')
-            from cmip_data.feedbacks import _feedbacks_from_fluxes
-            result = _feedbacks_from_fluxes(data, **kw_fluxes)
-            print(f'Saving file: {file}')
-            result.to_netcdf(base / file)  # }}}
-        results.append(result)
-
-    return results
-
-
 def process_scalar(dataset=None, output=None, suffix=None, **kwargs):
     """
     Save global climate feedbacks and uncertainty using `observed.calc_feedbacks`.
@@ -653,3 +568,88 @@ def process_scalar(dataset=None, output=None, suffix=None, **kwargs):
         print(f'Saving file: {output.name}')
         result.reset_index('version').to_netcdf(output)
     return result
+
+
+def process_spatial(dataset=None, output=None, **kwargs):
+    """
+    Save climate feedbacks using `cmip_data.process` and `cmip_data.feedbacks`.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset, optional
+        The input dataset. Default is ``open_dataset(globe=True)``.
+    output : path-like, optional
+        The output directory or name. If ``False`` nothing is saved.
+    **kwargs
+        Passed to `annual_filter` and `_feedbacks_from_fluxes`.
+    """
+    # Initial stuff
+    # NOTE: Here _feedbacks_from_fluxes() does not support detrending so instead apply
+    # detrending to input data. Then global averages of detrended process_spatial()
+    # results are identical to detrended process_scalar() (see jupyter notebook).
+    if dataset is None:  # {{{
+        dataset = open_dataset(globe=False)
+    if not isinstance(dataset, xr.Dataset):
+        raise ValueError('Input argument must be a dataset.')
+    if 'correct' in kwargs or 'pctile' in kwargs:
+        raise TypeError('Invalid input arguments.')
+    skip_keys, skip_values = ('correct', 'detrend'), ('f', 'ce', 'cl')
+    params, parts, kwargs = _parse_kwargs(skip_keys, skip_values, **kwargs)
+
+    # Calculate feedback versions
+    # NOTE: Feedbacks normalized by local T still capture 'internal' component and when
+    # _feedbacks_from_fluxes() takes global average for 'globe' region, result is same
+    # as average of uncorrected T minus average of T trends i.e. same as scalar detrend
+    results = []
+    for values in itertools.product(*params.values()):
+        # Create dataset and calculate climate feedbacks
+        # NOTE: Retain flux trends since they do not affect least squares regression
+        # estimate, only affect uncertainty. See jupyter notebook for examples.
+        kw = dict(zip(params, values))  # {{{
+        style = 'annual' if kw['annual'] else 'monthly'
+        remove = 'average' if kw['anomaly'] else 'climate'
+        source = LONGS_SOURCE[kw['source']]
+        kw_annual = {**kwargs, 'anomaly': kw.pop('anomaly', True)}
+        kw_fluxes = dict(style=style, components=('', 'cs'), boundaries=('t',))
+        data = annual_filter(dataset, **kw_annual)
+        data = data.rename({f'ts_{source[:3]}': 'ts'})
+        data['ts'] = detrend_dims(data.ts)  # detrend temperature (see above)
+        for values in itertools.product(*parts.values()):
+            from coupled.process import get_result
+            items = dict(zip(parts, values))
+            cld, wav, sky = items['cld'], items['wav'], items['sky']
+            cld, sky = (sky, '') if sky == 'cl' else (cld, sky)
+            name = f'{cld}_r{wav}nt{sky}'.strip('_')
+            data[name] = get_result(data, name, time=None)
+        names = [name for name in data.data_vars if name[:3] == 'ts_']
+        names += ['rlut', 'rlutcs', 'rsut', 'rsutcs', 'rsdt']
+        names += ['x', 'y', 'fit', 'fit1', 'fit2']
+        data = data.drop_vars(names)  # }}}
+
+        # Save feedback data
+        # Facets: ('CMIP6', 'CERES', 'historical', 'r1i1p1f1')
+        # Version: ('gis|had', 'monthly|annual', 'region', year1, year2)
+        if output is False:  # {{{
+            result = data
+        else:  # calculate feedbacks
+            start = data.time[0].dt.year.item()
+            stop = data.time[-1].dt.year.item()
+            head = 'feedbacks_Amon_CERES_historical_flagship'
+            tail = f'{start:04d}-{stop:04d}-{source}-{style}-{remove}.nc'
+            base = Path('~/data/ceres-feedbacks').expanduser()
+            file = '_'.join((head, tail))
+            if isinstance(output, Path) or '/' in (output or ''):  # copy to general.py
+                base = Path(output).expanduser()
+            elif output is not None:  # copy to general.py
+                file = output
+            if not base.is_dir():
+                os.mkdir(base)
+            if not base.is_dir():
+                raise ValueError(f'Invalid output location {base}.')
+            from cmip_data.feedbacks import _feedbacks_from_fluxes
+            result = _feedbacks_from_fluxes(data, **kw_fluxes)
+            print(f'Saving file: {file}')
+            result.to_netcdf(base / file)  # }}}
+        results.append(result)
+
+    return results

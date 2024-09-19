@@ -372,7 +372,7 @@ def regress_dims(
     numer = numer.drop_vars(numer.coords.keys() - numer.sizes.keys())
     wgts = wgts.drop_vars(wgts.coords.keys() - wgts.sizes.keys())
     denom, numer, wgts = xr.align(denom, numer, wgts)  # align 'dims' coordinates
-    denom, numer, wgts = xr.broadcast(denom, numer, wgts)  # broadcast other coordinates
+    orig, denom, numer, wgts = denom, *xr.broadcast(denom, numer, wgts)
     nulls = numer.isnull() | denom.isnull()
     numer, denom, wgts = numer.where(~nulls), denom.where(~nulls), wgts.where(~nulls)
 
@@ -484,7 +484,7 @@ def regress_dims(
         dsel = dsel.climo.to_units(denom.units)
         isel, nsel = {}, xr.full_like(dsel, np.nan, dtype=np.float64)
     elif not nosort:
-        isel = {dim: np.argsort(denom.values, axis=denom.dims.index(dim))}
+        isel = {dim: np.argsort(orig.values, axis=orig.dims.index(dim))}
         dsel, nsel = denom.isel(isel), numer.isel(isel)
     if not nofit:  # calculate fit and residual
         fit = offset + dsel * slope

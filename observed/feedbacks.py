@@ -356,12 +356,6 @@ def calc_feedback(
         flux = get_result(data, flux, time=None)
     elif not isinstance(flux, xr.DataArray):
         raise ValueError(f'Invalid input temperature {temp!r}')
-    mask = ~temp.isnull() & ~flux.isnull()
-    temp, flux = temp[mask], flux[mask]
-    if annual:
-        temp, flux = (annual_average(_, **kw_annual) for _ in (temp, flux))
-    else:
-        temp, flux = (annual_filter(_, **kw_annual) for _ in (temp, flux))
 
     # Get the feedbacks and combine results
     # WARNING: If calculating e.g. feedbacks starting in July for 150-year control
@@ -370,25 +364,28 @@ def calc_feedback(
     # NOTE: Previously embedded annual stuff inside regress_dims so **kwargs would
     # do it twice but with bootstrapping need to ensure correct starting months are
     # selected or e.g. might select 19-year sample instead of 20-year sample.
-    coords = None  # trend coordinates
-    times = [0]  # regression index
-    scale = 1 if annual else 12
-    size = flux.size  # regression size
+    mask = ~temp.isnull() & ~flux.isnull()
+    temp, flux = temp[mask], flux[mask]
+    coords, size, times = None, flux.size, [0]
     lams, lams1, lams2, dofs = [], [], [], []
     fits, fits1, fits2 = [], [], []
     if years is not None and years is not False:
         years, months = 20 if years is True else years, months or 0
         coords = np.linspace(np.min(temp), np.max(temp), 100)
-        size, step = months + scale * years, scale * (years // 2)
-        times = np.arange(0, flux.size - size + scale, step)  # NOTE: see above
+        size, step = months + 12 * years, 12 * (years // 2)
+        times = np.arange(0, flux.size - size + 12, step)  # NOTE: see above
         offset = flux.size - (times[-1] + size)
         if offset > 0:
-            msg = f'{offset / scale:.0f}/{flux.size / scale:.0f}'
+            msg = f'{offset / 12:.0f}/{flux.size / 12:.0f}'
             _warn_observed(f'Period {years} requires ignoring last {msg} years')
     for time in times:  # regression index
         datas = []
         for idx, data in enumerate((temp, flux)):
             idata = data[time:time + size]
+            if annual:
+                idata = annual_average(idata, **kw_annual)
+            else:  # possibly restrict
+                idata = annual_filter(idata, **kw_annual)
             if idx in itrend or idx in idetrend:
                 verb = verbose and time is times[0]
                 idata = detrend_dims(idata, verbose=verb, **kw_detrend)

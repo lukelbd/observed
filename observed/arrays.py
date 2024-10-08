@@ -16,7 +16,6 @@ import pandas as pd
 import xarray as xr
 from climopy import var, ureg, vreg  # noqa: F401
 
-
 __all__ = [
     'annual_average',
     'annual_filter',
@@ -26,39 +25,95 @@ __all__ = [
 ]
 
 # Region masks
-# NOTE: Should also add 'mask' argument to climopy 'average'
+# TODO: Consider workflow of using weights and masks for region averages instead
+# of complex 'truncation' function (revisit problem in climopy).
+# NOTE: WPG and ENSO regions defined in https://doi.org/10.1175/JCLI-D-12-00344.1 and
+# https://doi.org/10.1038/s41598-021-99738-3, tropical ratio and feedback regions in
+# https://doi.org/10.1175/JCLI-D-18-0843.1 and https://doi.org/10.1175/JCLI-D-17-0087.1.
 REGION_MASKS = {
     'globe': [
-        {'lat': (-60, 60)},
+        {'lon': (-180, 180), 'lat': (-60, 60)},
     ],
-    'natl': [
-        {'lat': (20, 60), 'lon': (-80, 0)},
+    'nh': [  # northern hemisphere
+        {'lon': (-180, 180), 'lat': (0, 90)},
     ],
-    'npac': [
-        {'lat': (20, 60), 'lon': (120, 180)},
-        {'lat': (20, 60), 'lon': (-180, -100)},
+    'ne': [  # northern extratropics
+        {'lon': (-180, 180), 'lat': (30, 60)},
     ],
-    'tatl': [
-        {'lat': (-40, 10), 'lon': (-70, 0)},
-        {'lat': (-40, 10), 'lon': (0, 20)},
-        {'lat': (10, 40), 'lon': (-80, 0)},
+    'sh': [  # southern hemisphere
+        {'lon': (-180, 180), 'lat': (-90, 0)},
     ],
-    'tpac': [
-        {'lat': (-40, -10), 'lon': (150, 180)},
-        {'lat': (-10, 40), 'lon': (100, 180)},
-        {'lat': (-40, 10), 'lon': (-180, -70)},
-        {'lat': (10, 40), 'lon': (-180, -100)},
+    'se': [  # southern extratropics
+        {'lon': (-180, 180), 'lat': (-60, -30)},
+    ],
+    'so': [  # southern ocean
+        {'lon': (-180, 180), 'lat': (-60, -30)},
+    ],
+    'trop': [  # tropics
+        {'lon': (-180, 180), 'lat': (-30, 30)},
     ],
     'atl': [  # see davis et al. 2019
         {'lat': (-60, 10), 'lon': (-70, 0)},
         {'lat': (-60, 10), 'lon': (0, 20)},
         {'lat': (10, 60), 'lon': (-80, 0)},
     ],
+    'iatl': [  # inner atlantic, exclude high latitude
+        {'lat': (-50, 10), 'lon': (-70, 0)},
+        {'lat': (-50, 10), 'lon': (0, 20)},
+        {'lat': (10, 50), 'lon': (-80, 0)},
+    ],
+    'tatl': [  # tropical atlantic
+        {'lat': (-30, 10), 'lon': (-70, 0)},
+        {'lat': (-30, 10), 'lon': (0, 20)},
+        {'lat': (10, 30), 'lon': (-80, 0)},
+    ],
+    'natl': [  # northern atlantic
+        {'lat': (20, 60), 'lon': (-80, 0)},
+    ],
     'pac': [  # see davis et al. 2019
         {'lat': (-60, -10), 'lon': (150, 180)},
         {'lat': (-10, 60), 'lon': (100, 180)},
         {'lat': (-60, 10), 'lon': (-180, -70)},
         {'lat': (10, 60), 'lon': (-180, -100)},
+    ],
+    'tpac': [  # tropical pacific
+        {'lat': (-30, 0), 'lon': (150, 180)},
+        {'lat': (0, 30), 'lon': (125, 180)},
+        {'lat': (-30, 10), 'lon': (-180, -70)},
+        {'lat': (10, 30), 'lon': (-180, -100)},
+    ],
+    'ipac': [  # inner pacific, exclude south china sea and high latitude
+        {'lat': (-50, 0), 'lon': (150, 180)},
+        {'lat': (0, 50), 'lon': (125, 180)},
+        {'lat': (-50, 10), 'lon': (-180, -70)},
+        {'lat': (10, 50), 'lon': (-180, -100)},
+    ],
+    'npac': [  # northern pacific
+        {'lat': (20, 60), 'lon': (120, 180)},
+        {'lat': (20, 60), 'lon': (-180, -100)},
+    ],
+    'wpac': [  # 'west pacific' (+4K paper uses 150 to 170)
+        {'lat': (-15, 15), 'lon': (90, 150)},
+    ],
+    'nina': [  # 'warm pool'
+        {'lat': (0, 10), 'lon': (130, 150)},
+    ],
+    'pool': [  # 'warm pool'
+        {'lat': (-30, 30), 'lon': (50, 180)},
+        {'lat': (-30, 30), 'lon': (-180, 160)},
+    ],
+    'epac': [  # 'east pacific' (+4K paper uses -100 to -80)
+        {'lat': (-30, 0), 'lon': (-100, -70)},
+    ],
+    'nino': [  # 'cold tongue'
+        {'lat': (-5, 5), 'lon': (-170, -120)},
+    ],
+    'nino3': [  # 'cold tongue'
+        {'lat': (-5, 5), 'lon': (-150, -90)},
+    ],
+    'nino4': [  # 'cold tongue'
+        {'lat': (-5, 5), 'lon': (160, 180)},
+        {'lat': (-5, 5), 'lon': (-180, -150)},
     ],
 }
 
@@ -312,7 +367,7 @@ def mask_region(data, *args, ocean=None, land=None):
     # TODO: Consider moving to climopy, adding mechanism for defining regions, and
     # supporting arbitrary cf longitude latitude coordinate names instead of standard.
     from global_land_mask import globe
-    lon = data.lon.values.copy()  # {{{
+    lon = data.lon.values.copy()
     lat = data.lat.values.copy()
     lon[lon > 180] -= 360  # plugin convention
     lon, lat = np.meshgrid(lon, lat)  # creates lat x lon arrays
@@ -323,6 +378,7 @@ def mask_region(data, *args, ocean=None, land=None):
     if land or ocean is not None and not ocean:  # land only
         mask1 &= globe.is_land(lat, lon)
     for name in args:
+        name = name or 'globe'
         if name not in REGION_MASKS:
             msg = ', '.join(map(repr, REGION_MASKS))
             raise ValueError(f'Invalid region {name!r}. Options are: {msg}')
@@ -382,7 +438,7 @@ def regress_dims(
         Whether to skip calculating fit bounds. If ``True`` the two fit bound arguments
         are not returned and the denominator coordinate is not sorted.
     **kwargs
-        Passed to `_mask_region`. Used to mask out regions.
+        Passed to `mask_region`. Used to mask out regions.
 
     Returns
     -------
